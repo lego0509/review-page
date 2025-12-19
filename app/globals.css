@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Noto Sans JP', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+body {
+  @apply antialiased;
+}
+
+input[type='text'],
+textarea,
+select {
+  @apply text-gray-800;
+}
+
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.section-heading {
+  @apply text-lg font-bold text-gray-900;
+}
+
+.subtext {
+  @apply text-sm text-gray-500;
+}
+
+.label {
+  @apply text-sm font-semibold text-gray-800;
+}
+
+.field-wrapper {
+  @apply space-y-2;
+}
+
+.control {
+  @apply w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200;
+}
+
+.checklist {
+  @apply flex flex-col gap-2 text-sm text-gray-700;
+}
+
+.radio-group label,
+.checklist label {
+  @apply cursor-pointer select-none;
+}
+
+.star-button {
+  @apply flex h-9 w-9 items-center justify-center rounded-full border border-transparent transition-colors; 
+}
+
+.star-button:focus-visible {
+  @apply outline-none ring-2 ring-brand-300;
+}
+
+.button-primary {
+  @apply flex w-full items-center justify-center gap-2 rounded-md bg-brand-600 px-4 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none;
+}
+
+.badge-soft {
+  @apply rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-600;
+}
+
+.section-card {
+  @apply rounded-xl border border-slate-200 bg-white p-5 shadow-sm;
+}
+
+@media (min-width: 640px) {
+  .section-card {
+    @apply p-6;
+  }
+}
