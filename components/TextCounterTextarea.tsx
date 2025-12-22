@@ -3,7 +3,9 @@
 import { TextareaHTMLAttributes, useMemo } from 'react';
 import clsx from 'clsx';
 
-interface TextCounterTextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
+type NativeTextareaProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'onChange' | 'value'>;
+
+interface TextCounterTextareaProps extends NativeTextareaProps {
   value: string;
   onChange: (value: string) => void;
   minLength?: number;
