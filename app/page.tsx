@@ -72,8 +72,8 @@ export default function ReviewFormPage() {
   }, [form]);
 
   return (
-    <main className="flex min-h-screen justify-center px-4 py-6 sm:px-6 lg:px-8">
-      <div className="w-full max-w-6xl space-y-5 rounded-2xl bg-white/80 p-4 shadow-soft backdrop-blur-sm sm:p-6 lg:p-8">
+    <main className="flex min-h-screen justify-center px-4 py-6 md:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-7xl space-y-4 rounded-2xl bg-white/80 p-4 shadow-soft backdrop-blur-sm">
         <header className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-lg font-bold text-gray-900">授業レビュー投稿</p>
@@ -85,10 +85,10 @@ export default function ReviewFormPage() {
           </div>
         </header>
 
-        <div className="space-y-5 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6 lg:p-7">
-          <div className="space-y-5 lg:space-y-4">
-            <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-3">
-              <SectionCard className="lg:col-span-2 xl:col-span-3" title="ユーザー情報" subtitle="大学と学年を入力してください">
+        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+              <SectionCard className="lg:col-span-4" title="ユーザー情報" subtitle="大学と学年を入力してください">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="field-wrapper md:col-span-2">
                     <label className="label" htmlFor="university">
@@ -147,8 +147,8 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard title="授業情報" subtitle="科目と教員名を入力してください">
-                <div className="grid gap-4 md:grid-cols-2">
+              <SectionCard className="lg:col-span-4" title="授業情報" subtitle="科目と教員名を入力してください">
+                <div className="grid gap-4">
                   <div className="field-wrapper">
                     <label className="label" htmlFor="courseName">
                       科目名＊
@@ -176,8 +176,45 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard title="授業の特徴" subtitle="該当するものをすべて選択してください（任意）">
-                <div className="grid gap-6 md:grid-cols-2">
+              <SectionCard className="lg:col-span-4" title="成績・課題難易度" subtitle="短い選択項目をまとめています（必須）">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2 text-sm text-gray-700">
+                    <p className="label">成績</p>
+                    {courseGrades.map((grade) => (
+                      <label key={grade} className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="courseGrade"
+                          value={grade}
+                          checked={form.courseGrade === grade}
+                          onChange={(e) => handleChange('courseGrade', e.target.value)}
+                          className="h-4 w-4 border-slate-300 text-brand-600 focus:ring-brand-400"
+                        />
+                        <span>{grade}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="space-y-2 text-sm text-gray-700">
+                    <p className="label">課題の難易度</p>
+                    {assignmentDifficulties.map((level) => (
+                      <label key={level} className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="assignmentDifficulty"
+                          value={level}
+                          checked={form.assignmentDifficulty === level}
+                          onChange={(e) => handleChange('assignmentDifficulty', e.target.value)}
+                          className="h-4 w-4 border-slate-300 text-brand-600 focus:ring-brand-400"
+                        />
+                        <span>{level}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard className="lg:col-span-12" title="授業の特徴" subtitle="該当するものをすべて選択してください（任意）">
+                <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-4">
                   <div className="space-y-2">
                     <p className="label">授業形式</p>
                     <div className="checklist">
@@ -195,9 +232,9 @@ export default function ReviewFormPage() {
                     </div>
                   </div>
 
-                  <div className="space-y-2">
+                  <div className="space-y-2 lg:col-span-3">
                     <p className="label">教材</p>
-                    <div className="checklist">
+                    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-4">
                       {materials.map((item) => (
                         <label key={item} className="flex items-center gap-2">
                           <input
@@ -214,8 +251,8 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard className="lg:col-span-2 xl:col-span-3" title="評価" subtitle="すべての項目を1~5で評価してください">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <SectionCard className="lg:col-span-12" title="評価" subtitle="すべての項目を1~5で評価してください">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {assessmentOptions.map((item) => (
                     <StarRating
                       key={item.key}
@@ -227,43 +264,7 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard title="成績" subtitle="取得した成績を選択してください（必須）">
-                <div className="space-y-2 text-sm text-gray-700">
-                  {courseGrades.map((grade) => (
-                    <label key={grade} className="flex items-center gap-2">
-                      <input
-                        type="radio"
-                        name="courseGrade"
-                        value={grade}
-                        checked={form.courseGrade === grade}
-                        onChange={(e) => handleChange('courseGrade', e.target.value)}
-                        className="h-4 w-4 border-slate-300 text-brand-600 focus:ring-brand-400"
-                      />
-                      <span>{grade}</span>
-                    </label>
-                  ))}
-                </div>
-              </SectionCard>
-
-              <SectionCard title="課題の難易度" subtitle="レポート・課題の難易度を選択してください（必須）">
-                <div className="space-y-2 text-sm text-gray-700">
-                  {assignmentDifficulties.map((level) => (
-                    <label key={level} className="flex items-center gap-2">
-                      <input
-                        type="radio"
-                        name="assignmentDifficulty"
-                        value={level}
-                        checked={form.assignmentDifficulty === level}
-                        onChange={(e) => handleChange('assignmentDifficulty', e.target.value)}
-                        className="h-4 w-4 border-slate-300 text-brand-600 focus:ring-brand-400"
-                      />
-                      <span>{level}</span>
-                    </label>
-                  ))}
-                </div>
-              </SectionCard>
-
-              <SectionCard className="lg:col-span-2 xl:col-span-3" title="コメント" subtitle="30文字以上でご記入ください">
+              <SectionCard className="lg:col-span-12" title="コメント" subtitle="30文字以上でご記入ください">
                 <TextCounterTextarea
                   label="コメント"
                   value={form.comment}
@@ -272,20 +273,22 @@ export default function ReviewFormPage() {
                   placeholder="テスト形式、課題量、出席の厳しさなど一言でOK"
                 />
               </SectionCard>
-            </div>
 
-            <div className="sticky bottom-0 left-0 right-0 z-10 -mx-4 mt-2 bg-white/95 px-4 pb-2 pt-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0">
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  className="button-primary w-full sm:w-auto sm:min-w-[240px]"
-                  disabled={!isFormValid}
-                >
-                  <span role="img" aria-label="send">
-                    ✉️
-                  </span>
-                  レビューを投稿する
-                </button>
+              <div className="lg:col-span-12">
+                <div className="sticky bottom-0 left-0 right-0 z-10 -mx-4 mt-2 bg-white/95 px-4 pb-2 pt-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0">
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="button-primary w-full sm:w-auto sm:min-w-[240px]"
+                      disabled={!isFormValid}
+                    >
+                      <span role="img" aria-label="send">
+                        ✉️
+                      </span>
+                      レビューを投稿する
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
