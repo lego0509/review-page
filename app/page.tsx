@@ -72,8 +72,8 @@ export default function ReviewFormPage() {
   }, [form]);
 
   return (
-    <main className="flex min-h-screen justify-center px-3 py-6 sm:px-6">
-      <div className="w-full max-w-5xl space-y-6 rounded-2xl bg-white/70 p-5 shadow-soft backdrop-blur-sm sm:p-8">
+    <main className="flex min-h-screen justify-center px-4 py-6 sm:px-6 lg:px-8">
+      <div className="w-full max-w-3xl space-y-6 rounded-2xl bg-white/80 p-4 shadow-soft backdrop-blur-sm sm:p-6 lg:p-8">
         <header className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-lg font-bold text-gray-900">授業レビュー投稿</p>
@@ -85,93 +85,91 @@ export default function ReviewFormPage() {
           </div>
         </header>
 
-        <div className="space-y-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        <div className="space-y-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6 lg:p-7">
           <div className="space-y-6">
-            <div className="grid gap-6 lg:grid-cols-2">
-              <SectionCard title="ユーザー情報" subtitle="大学と学年を入力してください">
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="university">
-                    大学名＊
-                  </label>
-                  <input
-                    id="university"
-                    className="control"
-                    placeholder="例：東京大学"
-                    value={form.university}
-                    onChange={(e) => handleChange('university', e.target.value)}
-                  />
-                </div>
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="faculty">
-                    学部名＊
-                  </label>
-                  <input
-                    id="faculty"
-                    className="control"
-                    placeholder="例：工学部"
-                    value={form.faculty}
-                    onChange={(e) => handleChange('faculty', e.target.value)}
-                  />
-                </div>
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="department">
-                    学科名
-                  </label>
-                  <input
-                    id="department"
-                    className="control"
-                    placeholder="例：情報工学科（任意）"
-                    value={form.department}
-                    onChange={(e) => handleChange('department', e.target.value)}
-                  />
-                </div>
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="academicYear">
-                    学年＊
-                  </label>
-                  <select
-                    id="academicYear"
-                    className="control"
-                    value={form.academicYear}
-                    onChange={(e) => handleChange('academicYear', e.target.value)}
-                  >
-                    <option value="">学年を選択</option>
-                    {academicYears.map((year) => (
-                      <option key={year} value={year}>
-                        {year}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </SectionCard>
+            <SectionCard title="ユーザー情報" subtitle="大学と学年を入力してください">
+              <div className="field-wrapper">
+                <label className="label" htmlFor="university">
+                  大学名＊
+                </label>
+                <input
+                  id="university"
+                  className="control"
+                  placeholder="例：東京大学"
+                  value={form.university}
+                  onChange={(e) => handleChange('university', e.target.value)}
+                />
+              </div>
+              <div className="field-wrapper">
+                <label className="label" htmlFor="faculty">
+                  学部名＊
+                </label>
+                <input
+                  id="faculty"
+                  className="control"
+                  placeholder="例：工学部"
+                  value={form.faculty}
+                  onChange={(e) => handleChange('faculty', e.target.value)}
+                />
+              </div>
+              <div className="field-wrapper">
+                <label className="label" htmlFor="department">
+                  学科名
+                </label>
+                <input
+                  id="department"
+                  className="control"
+                  placeholder="例：情報工学科（任意）"
+                  value={form.department}
+                  onChange={(e) => handleChange('department', e.target.value)}
+                />
+              </div>
+              <div className="field-wrapper md:max-w-xs">
+                <label className="label" htmlFor="academicYear">
+                  学年＊
+                </label>
+                <select
+                  id="academicYear"
+                  className="control"
+                  value={form.academicYear}
+                  onChange={(e) => handleChange('academicYear', e.target.value)}
+                >
+                  <option value="">学年を選択</option>
+                  {academicYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </SectionCard>
 
-              <SectionCard title="授業情報" subtitle="科目と教員名を入力してください">
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="courseName">
-                    科目名＊
-                  </label>
-                  <input
-                    id="courseName"
-                    className="control"
-                    placeholder="例：データベース概論"
-                    value={form.courseName}
-                    onChange={(e) => handleChange('courseName', e.target.value)}
-                  />
-                </div>
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="instructor">
-                    教員名＊
-                  </label>
-                  <input
-                    id="instructor"
-                    className="control"
-                    placeholder="例：山田太郎"
-                    value={form.instructor}
-                    onChange={(e) => handleChange('instructor', e.target.value)}
-                  />
-                </div>
-              </SectionCard>
-            </div>
+            <SectionCard title="授業情報" subtitle="科目と教員名を入力してください">
+              <div className="field-wrapper">
+                <label className="label" htmlFor="courseName">
+                  科目名＊
+                </label>
+                <input
+                  id="courseName"
+                  className="control"
+                  placeholder="例：データベース概論"
+                  value={form.courseName}
+                  onChange={(e) => handleChange('courseName', e.target.value)}
+                />
+              </div>
+              <div className="field-wrapper">
+                <label className="label" htmlFor="instructor">
+                  教員名＊
+                </label>
+                <input
+                  id="instructor"
+                  className="control"
+                  placeholder="例：山田太郎"
+                  value={form.instructor}
+                  onChange={(e) => handleChange('instructor', e.target.value)}
+                />
+              </div>
+            </SectionCard>
 
             <SectionCard title="授業の特徴" subtitle="該当するものをすべて選択してください（任意）">
               <div className="grid gap-6 md:grid-cols-2">
@@ -272,13 +270,19 @@ export default function ReviewFormPage() {
               />
             </SectionCard>
 
-            <div className="flex justify-end">
-              <button type="button" className="button-primary w-full sm:w-auto sm:min-w-[240px]" disabled={!isFormValid}>
-                <span role="img" aria-label="send">
-                  ✉️
-                </span>
-                レビューを投稿する
-              </button>
+            <div className="sticky bottom-0 left-0 right-0 z-10 -mx-4 mt-2 bg-white/95 px-4 pb-2 pt-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0">
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className="button-primary w-full sm:w-auto sm:min-w-[240px]"
+                  disabled={!isFormValid}
+                >
+                  <span role="img" aria-label="send">
+                    ✉️
+                  </span>
+                  レビューを投稿する
+                </button>
+              </div>
             </div>
           </div>
         </div>

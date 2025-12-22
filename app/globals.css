@@ -37,7 +37,7 @@ select {
 }
 
 .control {
-  @apply w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200;
+  @apply w-full min-h-[44px] rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200;
 }
 
 .checklist {
@@ -66,7 +66,7 @@ select {
 }
 
 .section-card {
-  @apply rounded-xl border border-slate-200 bg-white p-5 shadow-sm;
+  @apply rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:p-6;
 }
 
 @media (min-width: 640px) {
