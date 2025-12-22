@@ -73,7 +73,7 @@ export default function ReviewFormPage() {
 
   return (
     <main className="flex min-h-screen justify-center px-4 py-6 sm:px-6 lg:px-8">
-      <div className="w-full max-w-4xl space-y-6 rounded-2xl bg-white/80 p-4 shadow-soft backdrop-blur-sm sm:p-6 lg:p-8">
+      <div className="w-full max-w-6xl space-y-5 rounded-2xl bg-white/80 p-4 shadow-soft backdrop-blur-sm sm:p-6 lg:p-8">
         <header className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-lg font-bold text-gray-900">授業レビュー投稿</p>
@@ -87,8 +87,8 @@ export default function ReviewFormPage() {
 
         <div className="space-y-5 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6 lg:p-7">
           <div className="space-y-5 lg:space-y-4">
-            <div className="grid gap-5 lg:grid-cols-2">
-              <SectionCard className="lg:col-span-2" title="ユーザー情報" subtitle="大学と学年を入力してください">
+            <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-3">
+              <SectionCard className="lg:col-span-2 xl:col-span-3" title="ユーザー情報" subtitle="大学と学年を入力してください">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="field-wrapper md:col-span-2">
                     <label className="label" htmlFor="university">
@@ -102,7 +102,7 @@ export default function ReviewFormPage() {
                       onChange={(e) => handleChange('university', e.target.value)}
                     />
                   </div>
-                  <div className="field-wrapper md:col-span-2">
+                  <div className="field-wrapper">
                     <label className="label" htmlFor="faculty">
                       学部名＊
                     </label>
@@ -114,7 +114,7 @@ export default function ReviewFormPage() {
                       onChange={(e) => handleChange('faculty', e.target.value)}
                     />
                   </div>
-                  <div className="field-wrapper md:col-span-2">
+                  <div className="field-wrapper">
                     <label className="label" htmlFor="department">
                       学科名
                     </label>
@@ -148,29 +148,31 @@ export default function ReviewFormPage() {
               </SectionCard>
 
               <SectionCard title="授業情報" subtitle="科目と教員名を入力してください">
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="courseName">
-                    科目名＊
-                  </label>
-                  <input
-                    id="courseName"
-                    className="control"
-                    placeholder="例：データベース概論"
-                    value={form.courseName}
-                    onChange={(e) => handleChange('courseName', e.target.value)}
-                  />
-                </div>
-                <div className="field-wrapper">
-                  <label className="label" htmlFor="instructor">
-                    教員名＊
-                  </label>
-                  <input
-                    id="instructor"
-                    className="control"
-                    placeholder="例：山田太郎"
-                    value={form.instructor}
-                    onChange={(e) => handleChange('instructor', e.target.value)}
-                  />
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="field-wrapper">
+                    <label className="label" htmlFor="courseName">
+                      科目名＊
+                    </label>
+                    <input
+                      id="courseName"
+                      className="control"
+                      placeholder="例：データベース概論"
+                      value={form.courseName}
+                      onChange={(e) => handleChange('courseName', e.target.value)}
+                    />
+                  </div>
+                  <div className="field-wrapper">
+                    <label className="label" htmlFor="instructor">
+                      教員名＊
+                    </label>
+                    <input
+                      id="instructor"
+                      className="control"
+                      placeholder="例：山田太郎"
+                      value={form.instructor}
+                      onChange={(e) => handleChange('instructor', e.target.value)}
+                    />
+                  </div>
                 </div>
               </SectionCard>
 
@@ -212,8 +214,8 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard className="lg:col-span-2" title="評価" subtitle="すべての項目を1~5で評価してください">
-                <div className="grid gap-4 md:grid-cols-2">
+              <SectionCard className="lg:col-span-2 xl:col-span-3" title="評価" subtitle="すべての項目を1~5で評価してください">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {assessmentOptions.map((item) => (
                     <StarRating
                       key={item.key}
@@ -261,7 +263,7 @@ export default function ReviewFormPage() {
                 </div>
               </SectionCard>
 
-              <SectionCard className="lg:col-span-2" title="コメント" subtitle="30文字以上でご記入ください">
+              <SectionCard className="lg:col-span-2 xl:col-span-3" title="コメント" subtitle="30文字以上でご記入ください">
                 <TextCounterTextarea
                   label="コメント"
                   value={form.comment}
