@@ -1,7 +1,7 @@
 export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
-import crypto from 'crypto';
+import { createHmac } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 type TermCode = 's1' | 's2' | 'q1' | 'q2' | 'q3' | 'q4' | 'full' | 'intensive' | 'other';
@@ -27,18 +27,23 @@ type Payload = {
   performance_self: number; // 1..4
   assignment_difficulty_4: number; // 1..4
 
-  credit_ease: number;
-  class_difficulty: number;
-  assignment_load: number;
-  attendance_strictness: number;
-  satisfaction: number;
-  recommendation: number;
+  credit_ease: number; // 1..5
+  class_difficulty: number; // 1..5
+  assignment_load: number; // 1..5
+  attendance_strictness: number; // 1..5
+  satisfaction: number; // 1..5
+  recommendation: number; // 1..5
 
   body_main: string; // >=30
 };
 
-function sha256Hex(input: string) {
-  return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
+function lineUserIdToHash(lineUserId: string) {
+  const pepper = process.env.LINE_HASH_PEPPER;
+  if (!pepper) {
+    // ここを黙って空文字にすると「環境差」でユーザーが分裂して地獄になる
+    throw new Error('LINE_HASH_PEPPER is not set');
+  }
+  return createHmac('sha256', pepper).update(lineUserId, 'utf8').digest('hex');
 }
 
 function supabaseErrorToJson(err: any) {
@@ -119,7 +124,7 @@ async function getOrCreateSubjectId(universityId: string, subjectName: string) {
 }
 
 async function getOrCreateUserId(lineUserId: string) {
-  const hash = sha256Hex(lineUserId);
+  const hash = lineUserIdToHash(lineUserId);
 
   const { data: found, error: findErr } = await supabaseAdmin
     .from('users')
@@ -163,7 +168,7 @@ export async function POST(req: Request) {
     const teacherNames = (body.teacher_names ?? []).map((s) => s.trim()).filter(Boolean);
     const comment = body.body_main?.trim();
 
-    // 最低限の入力チェック（細かい数値範囲はDB制約に任せてOK）
+    // 最低限の入力チェック（細かい数値範囲はDB制約に任せる）
     if (!body.line_user_id) {
       return NextResponse.json({ error: 'line_user_id is required' }, { status: 400 });
     }
@@ -177,13 +182,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'comment must be >= 30 chars' }, { status: 400 });
     }
 
-    // user / university を先に確定
+    // user / university 確定
     const [userId, universityId] = await Promise.all([
       getOrCreateUserId(body.line_user_id),
       getOrCreateUniversityId(universityName),
     ]);
 
-    // ここで user_affiliations を upsert（最新所属として保存）
+    // user_affiliations を upsert（最新所属として保存）
     {
       const { error: affErr } = await supabaseAdmin
         .from('user_affiliations')
@@ -193,13 +198,11 @@ export async function POST(req: Request) {
             university_id: universityId,
             faculty,
             department,
-            updated_at: new Date().toISOString(),
           },
           { onConflict: 'user_id' }
         );
 
       if (affErr) {
-        // 所属保存は重要なので、失敗したら止める（ここは妥協しない）
         return NextResponse.json(
           { error: 'failed to upsert user_affiliations', details: supabaseErrorToJson(affErr) },
           { status: 500 }
@@ -245,7 +248,6 @@ export async function POST(req: Request) {
       .single();
 
     if (insReviewErr) {
-      // DB制約違反などは 400（クライアント入力の問題）で返す
       return NextResponse.json(
         { error: 'failed to insert course_reviews', details: supabaseErrorToJson(insReviewErr) },
         { status: 400 }
@@ -260,13 +262,10 @@ export async function POST(req: Request) {
           {
             subject_id: subjectId,
             is_dirty: true,
-            updated_at: new Date().toISOString(),
           },
           { onConflict: 'subject_id' }
         );
 
-      // ここは「投稿成功を優先」するなら try/catch で握ってもいいが、
-      // まずは設計どおりに確実に立てる（失敗は検知したい）
       if (rollErr) {
         return NextResponse.json(
           { error: 'failed to upsert subject_rollups', details: supabaseErrorToJson(rollErr) },
