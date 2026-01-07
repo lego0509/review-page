@@ -342,9 +342,9 @@ export async function POST(req: Request) {
         // 片肺データ防止：本体レビューを消す（bodiesはinsert失敗してるので存在しない）
         await supabaseAdmin.from('course_reviews').delete().eq('id', insertedReviewId);
         insertedReviewId = null;
+        console.error('[course_review_bodies insert error]', bodyErr);
 
         return NextResponse.json(
-          console.error('[course_review_bodies insert error]', bodyErr);
           { error: 'failed to insert course_review_bodies', details: supabaseErrorToJson(bodyErr) },
           { status: 400 }
         );
