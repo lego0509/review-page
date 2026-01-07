@@ -4,29 +4,48 @@ import { NextResponse } from 'next/server';
 import { createHmac } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
+/**
+ * term / requirement は DB の CHECK 制約と合わせる。
+ * → ここがズレると insert が 400 で落ちる。
+ */
 type TermCode = 's1' | 's2' | 'q1' | 'q2' | 'q3' | 'q4' | 'full' | 'intensive' | 'other';
 type RequirementType = 'required' | 'elective' | 'unknown';
 
 type Payload = {
+  // LIFFから来るLINEユーザーID（生IDをDB保存しない）
   line_user_id: string;
 
+  // 大学名（universitiesへ getOrCreate）
   university_name: string;
+
+  // 所属（user_affiliationsを最新にupsertするために必須）
   faculty: string;
   department?: string | null;
   grade_at_take: number; // 1..6 or 99
 
+  // 授業名（subjectsへ getOrCreate）
   subject_name: string;
-  teacher_names: string[];
 
+  /**
+   * 教師名：任意
+   * - DB側は teacher_names_optional_valid() で NULL / 空配列OK
+   * - 入ってるなら要素の空白/NULLはNG
+   */
+  teacher_names?: string[] | null;
+
+  // 受講時期（同一科目に複数レビューを許容するため識別軸）
   academic_year: number;
   term: TermCode;
 
+  // その他メタ
   credits_at_take?: number | null;
   requirement_type_at_take: RequirementType;
 
+  // 自己評価系
   performance_self: number; // 1..4
   assignment_difficulty_4: number; // 1..4
 
+  // 5段階評価（DB側チェックあり）
   credit_ease: number; // 1..5
   class_difficulty: number; // 1..5
   assignment_load: number; // 1..5
@@ -34,18 +53,29 @@ type Payload = {
   satisfaction: number; // 1..5
   recommendation: number; // 1..5
 
-  body_main: string; // >=30
+  /**
+   * 本文：DBでは course_review_bodies に分離
+   * - 30文字以上制約は bodies 側で担保
+   */
+  body_main: string;
 };
 
+/**
+ * LINE userId を HMAC-SHA256(pepper) でハッシュ化して hex(64) を作る
+ * - “pepperが違う” と userが別人扱いで全崩壊するので、環境変数未設定は即例外
+ */
 function lineUserIdToHash(lineUserId: string) {
   const pepper = process.env.LINE_HASH_PEPPER;
   if (!pepper) {
-    // ここを黙って空文字にすると「環境差」でユーザーが分裂して地獄になる
     throw new Error('LINE_HASH_PEPPER is not set');
   }
   return createHmac('sha256', pepper).update(lineUserId, 'utf8').digest('hex');
 }
 
+/**
+ * Supabaseのエラーを JSON で返しやすい形にしてログ/レスポンスへ
+ * - 卒研のデバッグで「どの制約で落ちたか」追いやすくなる
+ */
 function supabaseErrorToJson(err: any) {
   if (!err) return null;
   return {
@@ -56,6 +86,11 @@ function supabaseErrorToJson(err: any) {
   };
 }
 
+/**
+ * universities から name で探して、無ければ insert する
+ * - UNIQUE(name) を貼ってるので同時投稿で競合する可能性がある
+ * - 競合(23505)なら再検索してIDを取る
+ */
 async function getOrCreateUniversityId(name: string) {
   const { data: found, error: findErr } = await supabaseAdmin
     .from('universities')
@@ -72,7 +107,7 @@ async function getOrCreateUniversityId(name: string) {
     .select('id')
     .single();
 
-  // unique違反（同時投稿）対策
+  // unique違反（同時投稿）対策：負けた側は再取得して整合
   if (insErr && (insErr as any).code === '23505') {
     const { data: again, error: againErr } = await supabaseAdmin
       .from('universities')
@@ -89,6 +124,11 @@ async function getOrCreateUniversityId(name: string) {
   return inserted.id;
 }
 
+/**
+ * subjects を (university_id, name) で探して無ければ insert
+ * - DBに UNIQUE(university_id, name) がある前提
+ * - 同時投稿競合(23505)なら再検索
+ */
 async function getOrCreateSubjectId(universityId: string, subjectName: string) {
   const { data: found, error: findErr } = await supabaseAdmin
     .from('subjects')
@@ -106,6 +146,7 @@ async function getOrCreateSubjectId(universityId: string, subjectName: string) {
     .select('id')
     .single();
 
+  // UNIQUE(university_id, name) 競合対策
   if (insErr && (insErr as any).code === '23505') {
     const { data: again, error: againErr } = await supabaseAdmin
       .from('subjects')
@@ -123,6 +164,11 @@ async function getOrCreateSubjectId(universityId: string, subjectName: string) {
   return inserted.id;
 }
 
+/**
+ * users を line_user_hash で探して無ければ insert
+ * - 生のLINE userIdはDBに保存しない
+ * - 競合時は再検索で整合を取る
+ */
 async function getOrCreateUserId(lineUserId: string) {
   const hash = lineUserIdToHash(lineUserId);
 
@@ -158,125 +204,47 @@ async function getOrCreateUserId(lineUserId: string) {
 }
 
 export async function POST(req: Request) {
+  /**
+   * 途中で失敗したときに「レビュー本体だけ残る」事故を防ぐため、
+   * insertしたreview_idを控えておく（cleanup用）
+   */
+  let insertedReviewId: string | null = null;
+
   try {
+    // 受信JSONをPayloadとして扱う（この段階では信用しない）
     const body = (await req.json()) as Payload;
 
+    // テキスト系は前処理でtrimしておく（DBのbtrimチェックに寄せる）
     const universityName = body.university_name?.trim();
     const faculty = body.faculty?.trim();
     const department = body.department?.trim() || null;
     const subjectName = body.subject_name?.trim();
-    const teacherNames = (body.teacher_names ?? []).map((s) => s.trim()).filter(Boolean);
+
+    // 教師は任意：配列が来ても空白は落とす。未入力は空配列になる。
+    const teacherNames = (body.teacher_names ?? [])
+      .map((s) => (s ?? '').trim())
+      .filter(Boolean);
+
+    // 本文（bodies側で30文字制約があるが、API側でも先に弾いてUXを良くする）
     const comment = body.body_main?.trim();
 
-    // 最低限の入力チェック（細かい数値範囲はDB制約に任せる）
+    // ----------------------------
+    // 1) 最低限の入力チェック
+    // ----------------------------
+    // （数値範囲の細かい検証はDB制約に任せる。APIで二重に書くとメンテ死ぬ）
     if (!body.line_user_id) {
       return NextResponse.json({ error: 'line_user_id is required' }, { status: 400 });
     }
     if (!universityName || !faculty || !subjectName) {
       return NextResponse.json({ error: 'missing required text' }, { status: 400 });
     }
-    if (teacherNames.length < 1) {
-      return NextResponse.json({ error: 'teacher_names is required' }, { status: 400 });
-    }
+    // 教師は任意なのでここでは弾かない
     if (!comment || comment.length < 30) {
       return NextResponse.json({ error: 'comment must be >= 30 chars' }, { status: 400 });
     }
 
-    // user / university 確定
+    // ----------------------------
+    // 2) user と university の確定
+    // ----------------------------
+    // 並列実行できるので Promise.all
     const [userId, universityId] = await Promise.all([
-      getOrCreateUserId(body.line_user_id),
-      getOrCreateUniversityId(universityName),
-    ]);
-
-    // user_affiliations を upsert（最新所属として保存）
-    {
-      const { error: affErr } = await supabaseAdmin
-        .from('user_affiliations')
-        .upsert(
-          {
-            user_id: userId,
-            university_id: universityId,
-            faculty,
-            department,
-          },
-          { onConflict: 'user_id' }
-        );
-
-      if (affErr) {
-        return NextResponse.json(
-          { error: 'failed to upsert user_affiliations', details: supabaseErrorToJson(affErr) },
-          { status: 500 }
-        );
-      }
-    }
-
-    // subject 確定
-    const subjectId = await getOrCreateSubjectId(universityId, subjectName);
-
-    // course_reviews insert
-    const { data: inserted, error: insReviewErr } = await supabaseAdmin
-      .from('course_reviews')
-      .insert({
-        user_id: userId,
-        subject_id: subjectId,
-
-        university_id: universityId,
-        faculty,
-        department,
-        grade_at_take: body.grade_at_take,
-
-        teacher_names: teacherNames,
-
-        academic_year: body.academic_year,
-        term: body.term,
-        credits_at_take: body.credits_at_take ?? null,
-        requirement_type_at_take: body.requirement_type_at_take,
-
-        performance_self: body.performance_self,
-        assignment_difficulty_4: body.assignment_difficulty_4,
-
-        credit_ease: body.credit_ease,
-        class_difficulty: body.class_difficulty,
-        assignment_load: body.assignment_load,
-        attendance_strictness: body.attendance_strictness,
-        satisfaction: body.satisfaction,
-        recommendation: body.recommendation,
-
-        body_main: comment,
-      })
-      .select('id')
-      .single();
-
-    if (insReviewErr) {
-      return NextResponse.json(
-        { error: 'failed to insert course_reviews', details: supabaseErrorToJson(insReviewErr) },
-        { status: 400 }
-      );
-    }
-
-    // subject_rollups を dirty に（後で集計・要約更新するため）
-    {
-      const { error: rollErr } = await supabaseAdmin
-        .from('subject_rollups')
-        .upsert(
-          {
-            subject_id: subjectId,
-            is_dirty: true,
-          },
-          { onConflict: 'subject_id' }
-        );
-
-      if (rollErr) {
-        return NextResponse.json(
-          { error: 'failed to upsert subject_rollups', details: supabaseErrorToJson(rollErr) },
-          { status: 500 }
-        );
-      }
-    }
-
-    return NextResponse.json({ ok: true, review_id: inserted.id });
-  } catch (e: any) {
-    console.error('[course-reviews] POST error:', e);
-    return NextResponse.json({ error: e?.message ?? 'server error' }, { status: 500 });
-  }
-}
