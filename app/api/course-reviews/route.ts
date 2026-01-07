@@ -344,6 +344,7 @@ export async function POST(req: Request) {
         insertedReviewId = null;
 
         return NextResponse.json(
+          console.error('[course_review_bodies insert error]', bodyErr);
           { error: 'failed to insert course_review_bodies', details: supabaseErrorToJson(bodyErr) },
           { status: 400 }
         );
