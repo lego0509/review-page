@@ -248,3 +248,185 @@ export async function POST(req: Request) {
     // ----------------------------
     // 並列実行できるので Promise.all
     const [userId, universityId] = await Promise.all([
+      getOrCreateUserId(body.line_user_id),
+      getOrCreateUniversityId(universityName),
+    ]);
+
+    // ----------------------------
+    // 3) user_affiliations を最新状態として upsert
+    // ----------------------------
+    // 履歴を持たない運用（最新のみ保持）
+    {
+      const { error: affErr } = await supabaseAdmin
+        .from('user_affiliations')
+        .upsert(
+          {
+            user_id: userId,
+            university_id: universityId,
+            faculty,
+            department,
+          },
+          { onConflict: 'user_id' }
+        );
+
+      if (affErr) {
+        return NextResponse.json(
+          { error: 'failed to upsert user_affiliations', details: supabaseErrorToJson(affErr) },
+          { status: 500 }
+        );
+      }
+    }
+
+    // ----------------------------
+    // 4) subject の確定（大学＋授業名で一意）
+    // ----------------------------
+    const subjectId = await getOrCreateSubjectId(universityId, subjectName);
+
+    // ----------------------------
+    // 5) course_reviews（本文以外）を insert
+    // ----------------------------
+    // 重要：
+    // - course_reviews に university_id はもう無い（subject経由で取る）
+    // - body_main は course_review_bodies に分離済み
+    const { data: inserted, error: insReviewErr } = await supabaseAdmin
+      .from('course_reviews')
+      .insert({
+        user_id: userId,
+        subject_id: subjectId,
+
+        faculty,
+        department,
+        grade_at_take: body.grade_at_take,
+
+        // 教師は任意：未入力はNULLに統一（空配列でもOKだがノイズが増える）
+        teacher_names: teacherNames.length > 0 ? teacherNames : null,
+
+        academic_year: body.academic_year,
+        term: body.term,
+        credits_at_take: body.credits_at_take ?? null,
+        requirement_type_at_take: body.requirement_type_at_take,
+
+        performance_self: body.performance_self,
+        assignment_difficulty_4: body.assignment_difficulty_4,
+
+        credit_ease: body.credit_ease,
+        class_difficulty: body.class_difficulty,
+        assignment_load: body.assignment_load,
+        attendance_strictness: body.attendance_strictness,
+        satisfaction: body.satisfaction,
+        recommendation: body.recommendation,
+      })
+      .select('id')
+      .single();
+
+    if (insReviewErr || !inserted?.id) {
+      return NextResponse.json(
+        { error: 'failed to insert course_reviews', details: supabaseErrorToJson(insReviewErr) },
+        { status: 400 }
+      );
+    }
+
+    insertedReviewId = inserted.id;
+
+    // ----------------------------
+    // 6) course_review_bodies（本文）を insert
+    // ----------------------------
+    // ここが失敗したら「本文なしレビュー」が残るので、必ず後始末する
+    {
+      const { error: bodyErr } = await supabaseAdmin.from('course_review_bodies').insert({
+        review_id: insertedReviewId,
+        body_main: comment,
+      });
+
+      if (bodyErr) {
+        // 片肺データ防止：本体レビューを消す（bodiesはinsert失敗してるので存在しない）
+        await supabaseAdmin.from('course_reviews').delete().eq('id', insertedReviewId);
+        insertedReviewId = null;
+
+        return NextResponse.json(
+          { error: 'failed to insert course_review_bodies', details: supabaseErrorToJson(bodyErr) },
+          { status: 400 }
+        );
+      }
+    }
+
+    // ----------------------------
+    // 7) embedding_jobs を queued で積む
+    // ----------------------------
+    // バッチ処理は「jobsを見て処理する」想定にすると運用が楽。
+    // - 未処理レビュー探索が確実
+    // - リトライ/ロック/失敗管理がやりやすい
+    {
+      const { error: jobErr } = await supabaseAdmin
+        .from('embedding_jobs')
+        .upsert(
+          {
+            review_id: insertedReviewId,
+            status: 'queued',
+            attempt_count: 0,
+            last_error: null,
+            locked_at: null,
+            locked_by: null,
+          },
+          { onConflict: 'review_id' }
+        );
+
+      if (jobErr) {
+        // ここで落ちると「レビューはあるのにジョブが無い」状態になって後で面倒
+        // 編集機能なし運用なら潔くロールバックでOK
+        await supabaseAdmin.from('course_reviews').delete().eq('id', insertedReviewId);
+        insertedReviewId = null;
+
+        return NextResponse.json(
+          { error: 'failed to upsert embedding_jobs', details: supabaseErrorToJson(jobErr) },
+          { status: 500 }
+        );
+      }
+    }
+
+    // ----------------------------
+    // 8) subject_rollups を dirty にする
+    // ----------------------------
+    // 投稿時点では集計・要約は更新しない（遅い/失敗がUX悪化）
+    // バッチが is_dirty=true を拾って集計(avg/count/summary)を更新する
+    {
+      const { error: rollErr } = await supabaseAdmin
+        .from('subject_rollups')
+        .upsert(
+          {
+            subject_id: subjectId,
+            is_dirty: true,
+          },
+          { onConflict: 'subject_id' }
+        );
+
+      if (rollErr) {
+        // dirtyが立たないと rollups更新が走らないので、これもロールバックで揃える
+        await supabaseAdmin.from('course_reviews').delete().eq('id', insertedReviewId);
+        insertedReviewId = null;
+
+        return NextResponse.json(
+          { error: 'failed to upsert subject_rollups', details: supabaseErrorToJson(rollErr) },
+          { status: 500 }
+        );
+      }
+    }
+
+    // 成功レスポンス
+    return NextResponse.json({ ok: true, review_id: insertedReviewId });
+  } catch (e: any) {
+    // 予期しない例外（JSON parse失敗やsupabaseのthrowなど）
+    console.error('[course-reviews] POST error:', e);
+
+    // 例外でも片肺防止：reviewだけ作れてる可能性があるので削除を試みる
+    if (insertedReviewId) {
+      try {
+        await supabaseAdmin.from('course_reviews').delete().eq('id', insertedReviewId);
+      } catch {
+        // ここでさらにエラー出ても、APIレスポンスの邪魔なので握りつぶす
+      }
+    }
+
+    return NextResponse.json({ error: e?.message ?? 'server error' }, { status: 500 });
+  }
+}
