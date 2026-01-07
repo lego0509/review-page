@@ -221,6 +221,63 @@ export default function ReviewFormPage() {
   }, [lineUserId]);
 
   // ----------------------------
+  // 3) systemUserId（users.id）が取れたら、所属を取ってフォームに事前入力する
+  // ----------------------------
+  useEffect(() => {
+    let canceled = false;
+  
+    const prefillAffiliation = async () => {
+      if (!systemUserId) return;
+  
+      try {
+        const res = await fetch('/api/user-affiliations/latest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: systemUserId }),
+        });
+  
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg =
+            typeof json?.error === 'string'
+              ? json.error
+              : json?.error?.message
+                ? json.error.message
+                : `所属の取得に失敗（HTTP ${res.status}）`;
+          throw new Error(msg);
+        }
+  
+        const aff = json?.affiliation;
+        if (!aff) return;
+  
+        // ユーザーが既に入力してたら上書きしない（体験を壊さない）
+        if (canceled) return;
+        setForm((prev) => {
+          const universityEmpty = prev.university.trim().length === 0;
+          const facultyEmpty = prev.faculty.trim().length === 0;
+          const departmentEmpty = prev.department.trim().length === 0;
+  
+          return {
+            ...prev,
+            university: universityEmpty ? String(aff.university_name ?? '') : prev.university,
+            faculty: facultyEmpty ? String(aff.faculty ?? '') : prev.faculty,
+            department: departmentEmpty ? String(aff.department ?? '') : prev.department,
+          };
+        });
+      } catch (e) {
+        // ここはフォーム利用自体を止めるほどではないので、静かにログだけ
+        console.warn('[prefill affiliation] failed:', e);
+      }
+    };
+  
+    prefillAffiliation();
+  
+    return () => {
+      canceled = true;
+    };
+  }, [systemUserId]);
+
+  // ----------------------------
   // フォーム操作系ヘルパ
   // ----------------------------
   const handleTextChange = (field: keyof typeof form, value: string) => {
