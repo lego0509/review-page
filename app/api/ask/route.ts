@@ -8,15 +8,17 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 /**
  * ---------------------------------------
- * /api/ask の責務（最低限）
+ * /api/ask の責務（会話＋DB参照）
  * ---------------------------------------
- * - ユーザーの自然文質問を受け取る
- * - OpenAI(Responses API) に tools(function calling) を渡す
- * - モデルが要求した tool を Supabase で実行
- * - 結果を function_call_output としてモデルへ返す
- * - モデルの最終回答（または聞き返し）を返す
+ * - ユーザーの自然文質問を受け取る（line_user_id + message）
+ * - users.id（内部ID）を確定（line_user_hash で検索/作成）
+ * - user_memory（要約）と chat_messages（直近ログ）を読み、会話文脈を作る
+ * - OpenAI(Responses API) + tools(Function Calling) で必要なDB検索を実行
+ * - 最終回答を返す（聞き返しも含む）
  *
- * ※ 「自由なSQL」は絶対やらない。必ず “用意した関数（ツール）” だけ実行する。
+ * 注意:
+ * - 「自由なSQL」は絶対やらない（ツールに限定）
+ * - 授業DBに無い話題は、普通に一般知識で会話してOK（ただしDB事実はツール結果のみ）
  */
 
 /** ---------- 環境変数 ---------- */
@@ -26,7 +28,7 @@ function requireEnv(name: string, value?: string | null) {
 }
 
 const OPENAI_API_KEY = requireEnv('OPENAI_API_KEY', process.env.OPENAI_API_KEY);
-const QA_MODEL = process.env.OPENAI_QA_MODEL || 'gpt-5-mini';
+const QA_MODEL = process.env.OPENAI_QA_MODEL || 'gpt-5-mini'; // 雑談/質問両方に使う
 const LINE_HASH_PEPPER = requireEnv('LINE_HASH_PEPPER', process.env.LINE_HASH_PEPPER);
 
 /** ---------- OpenAI client ---------- */
@@ -55,8 +57,14 @@ type RollupRow = {
   updated_at: string;
 };
 
+type ChatRow = {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+};
+
 function lineUserIdToHash(lineUserId: string) {
-  // LINEのuserIdはDBに生で保存しない（ハッシュ化）
+  // LINE userId はDBに生で保存しない（HMACでハッシュ化）
   return createHmac('sha256', LINE_HASH_PEPPER).update(lineUserId, 'utf8').digest('hex');
 }
 
@@ -65,11 +73,16 @@ function supabaseErrorToJson(err: any) {
   return { message: err.message, code: err.code, details: err.details, hint: err.hint };
 }
 
-/** ---------- DBユーティリティ（ユーザーID確定） ---------- */
+/** LIKE用エスケープ（% と _ を無害化） */
+function escapeForLike(s: string) {
+  return s.replace(/[%_\\]/g, (m) => '\\' + m);
+}
+
+/** ---------- DB: users.id（内部ID）確定 ---------- */
 async function getOrCreateUserId(lineUserId: string) {
   const hash = lineUserIdToHash(lineUserId);
 
-  // 既存ユーザー検索
+  // 既存検索
   const { data: found, error: findErr } = await supabaseAdmin
     .from('users')
     .select('id')
@@ -79,13 +92,14 @@ async function getOrCreateUserId(lineUserId: string) {
   if (findErr) throw findErr;
   if (found?.id) return found.id as string;
 
-  // 新規作成（同時実行のunique競合に備えてリトライ）
+  // 無ければ作成（unique競合のリトライ付き）
   const { data: inserted, error: insErr } = await supabaseAdmin
     .from('users')
     .insert({ line_user_hash: hash })
     .select('id')
     .single();
 
+  // 23505: unique_violation（同時作成）
   if (insErr && (insErr as any).code === '23505') {
     const { data: again, error: againErr } = await supabaseAdmin
       .from('users')
@@ -101,7 +115,37 @@ async function getOrCreateUserId(lineUserId: string) {
   return inserted.id as string;
 }
 
-/** ---------- tools（Function Calling）定義 ---------- */
+/** ---------- DB: user_memory / chat_messages 読み ---------- */
+async function getUserMemorySummary(userId: string) {
+  // user_memory が無い場合もあり得るので maybeSingle
+  const { data, error } = await supabaseAdmin
+    .from('user_memory')
+    .select('summary_1000')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data?.summary_1000 ?? '') as string;
+}
+
+async function getRecentChatMessages(userId: string, limit = 16) {
+  // 新しい順で取って、使うときに古い→新しいに並べ直す
+  const { data, error } = await supabaseAdmin
+    .from('chat_messages')
+    .select('role,content,created_at')
+    .eq('user_id', userId)
+    .in('role', ['user', 'assistant'])
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return ((data ?? []) as ChatRow[]).reverse();
+}
+
+/** ---------- tools（Function Calling）定義 ----------
+ * Responses API の function tool は `type/name/parameters` 形式（ネストの function ではない）: :contentReference[oaicite:0]{index=0}
+ */
 const tools: OpenAI.Responses.Tool[] = [
   {
     type: 'function',
@@ -151,7 +195,7 @@ const tools: OpenAI.Responses.Tool[] = [
     type: 'function',
     name: 'get_subject_rollup',
     description:
-      'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。必要なら単位取得状況も course_reviews から集計して返す。',
+      'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。単位取得状況（performance_self）も簡易集計して返す。',
     strict: true,
     parameters: {
       type: 'object',
@@ -195,7 +239,7 @@ const tools: OpenAI.Responses.Tool[] = [
 
 /** ---------- tool実装（Supabaseで安全に実行） ---------- */
 async function tool_get_my_affiliation(ctx: { userId: string }) {
-  // user_affiliations: user_id が主キー想定（1ユーザー=最新所属1件）
+  // user_affiliations は user_id で1行（最新所属）想定
   const { data, error } = await supabaseAdmin
     .from('user_affiliations')
     .select('university_id, faculty, department, universities(name)')
@@ -209,32 +253,31 @@ async function tool_get_my_affiliation(ctx: { userId: string }) {
     university_id: data.university_id as string,
     university_name: (data as any).universities?.name ?? null,
     faculty: data.faculty as string,
-    department: (data.department as string | null) ?? null,
+    department: (data as any).department ?? null,
   };
 }
 
 async function tool_resolve_university(args: { university_name: string; limit: number }) {
-  const name = args.university_name.trim();
+  const raw = args.university_name?.trim() ?? '';
   const limit = Math.max(1, Math.min(10, args.limit || 5));
+  if (!raw) return { picked: null, candidates: [] };
 
-  // 完全一致（大小無視はしない：まずは完全一致として扱う）
-  // ※ ilike で完全一致も可能だけど、複数ヒットした時に maybeSingle が落ちるので eq を優先
+  // まず「完全一致」を優先（日本語なら eq でほぼOK）
   const { data: exact, error: exactErr } = await supabaseAdmin
     .from('universities')
     .select('id,name')
-    .eq('name', name)
+    .eq('name', raw)
     .maybeSingle();
 
   if (exactErr) throw exactErr;
-  if (exact?.id) {
-    return { picked: exact as UniversityHit, candidates: [exact as UniversityHit] };
-  }
+  if (exact?.id) return { picked: exact as UniversityHit, candidates: [exact as UniversityHit] };
 
-  // 部分一致候補
+  // 次に部分一致（LIKEワイルドカード対策でエスケープ）
+  const kw = escapeForLike(raw);
   const { data: hits, error } = await supabaseAdmin
     .from('universities')
     .select('id,name')
-    .ilike('name', `%${name}%`)
+    .ilike('name', `%${kw}%`)
     .order('name', { ascending: true })
     .limit(limit);
 
@@ -247,29 +290,27 @@ async function tool_resolve_university(args: { university_name: string; limit: n
   };
 }
 
-async function tool_search_subjects_by_name(args: {
-  university_id: string;
-  keyword: string;
-  limit: number;
-}) {
-  const keyword = args.keyword.trim();
+async function tool_search_subjects_by_name(args: { university_id: string; keyword: string; limit: number }) {
+  const keywordRaw = args.keyword?.trim() ?? '';
   const limit = Math.max(1, Math.min(20, args.limit || 10));
+  if (!args.university_id || !keywordRaw) return [];
+
+  const kw = escapeForLike(keywordRaw);
 
   const { data, error } = await supabaseAdmin
     .from('subjects')
     .select('id,name,university_id')
     .eq('university_id', args.university_id)
-    .ilike('name', `%${keyword}%`)
+    .ilike('name', `%${kw}%`)
     .order('name', { ascending: true })
     .limit(limit);
 
   if (error) throw error;
-
   return (data || []) as SubjectHit[];
 }
 
 async function tool_get_subject_rollup(args: { subject_id: string }) {
-  // 1) rollup本体
+  // 1) rollup本体（無い場合もある）
   const { data: rollup, error: rollErr } = await supabaseAdmin
     .from('subject_rollups')
     .select(
@@ -280,7 +321,7 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
 
   if (rollErr) throw rollErr;
 
-  // 2) 科目名・大学名
+  // 2) subject名 + 大学名
   const { data: subj, error: subjErr } = await supabaseAdmin
     .from('subjects')
     .select('id,name,university_id,universities(name)')
@@ -289,7 +330,11 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
 
   if (subjErr) throw subjErr;
 
-  // 3) 「単位取得状況（performance_self）」を簡易集計
+  // 3) 単位取得状況の簡易集計（performance_self）
+  // - 2: 単位なし
+  // - 3: 単位あり（普通）
+  // - 4: 単位あり（高評価）
+  // - 1: 未評価
   const { data: perfRows, error: perfErr } = await supabaseAdmin
     .from('course_reviews')
     .select('performance_self')
@@ -344,20 +389,18 @@ async function tool_top_subjects_by_metric(args: {
   const limit = Math.max(1, Math.min(10, args.limit || 5));
   const minReviews = Math.max(0, args.min_reviews || 0);
 
-  // rollups -> subjects を join して科目名を取る
+  // rollups -> subjects を埋め込みselectし、大学IDで絞る
   const { data, error } = await supabaseAdmin
     .from('subject_rollups')
     .select(`subject_id,review_count,${args.metric},subjects(name,university_id)`)
     .gte('review_count', minReviews)
+    .eq('subjects.university_id', args.university_id)
     .order(args.metric, { ascending: args.order === 'asc', nullsFirst: false })
     .limit(limit);
 
   if (error) throw error;
 
-  // 大学で絞り込み（ネストフィルタは環境差が出やすいのでJS側で確実にやる）
-  const filtered = (data || []).filter((r: any) => r.subjects?.university_id === args.university_id);
-
-  return filtered.map((r: any) => ({
+  return (data || []).map((r: any) => ({
     subject_id: r.subject_id,
     subject_name: r.subjects?.name ?? null,
     review_count: r.review_count,
@@ -366,7 +409,7 @@ async function tool_top_subjects_by_metric(args: {
   }));
 }
 
-/** tool名→実装 のルーター */
+/** tool名→実装のルーター */
 async function callTool(name: string, args: any, ctx: { userId: string }) {
   switch (name) {
     case 'get_my_affiliation':
@@ -384,94 +427,97 @@ async function callTool(name: string, args: any, ctx: { userId: string }) {
   }
 }
 
-/** ---------- メイン：Function Calling（Responses API） ---------- */
-async function runAgent(params: { userMessage: string; userId: string }) {
-  const { userMessage, userId } = params;
+/** ---------- メイン：Function Calling ループ ----------
+ * Responses API では output に type:"function_call" が入り、call_id/name/arguments が返る。結果は type:"function_call_output" で返す。 :contentReference[oaicite:1]{index=1}
+ */
+async function runAgent(params: {
+  userMessage: string;
+  userId: string;
+  memorySummary: string;
+  recentChats: ChatRow[];
+}) {
+  const { userMessage, userId, memorySummary, recentChats } = params;
 
-  // モデルへの指示（ここが “性格” と “制約” の中心）
+  // ここが「性格＋制約」
   const developerPrompt = `
-あなたは「大学授業レビューDB」を根拠に回答するアシスタント。
-必ずツールで取得した事実に基づいて答える（推測で断定しない）。
+あなたは「大学授業レビューDB」を根拠に回答できるアシスタント。
 
-ルール：
-- 大学が不明で特定できないなら、まず大学を聞き返す。
-  ただし get_my_affiliation が取れて大学が一意なら、その大学として検索してよい（その旨を回答に明記）。
-- 科目が曖昧なら、search_subjects_by_name で候補を出してユーザーに選ばせる。
-- rollup が存在しない / is_dirty=true / summaryが空などの場合は「集計中/データ不足」を正直に伝える。
-- 回答には可能なら review_count と主要な平均値（満足度/おすすめ度/難易度）を添える。
-- 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
+重要:
+- DBに関する断定は、必ずツール結果に基づいて行う（推測で作らない）
+- DBに関係ない雑談・一般知識の質問は、普通に会話してOK（ただし嘘の“DB事実”は言わない）
+
+動き方（DB質問のとき）:
+- 大学が不明で特定できないなら、まず大学名を聞き返す
+  - ただし get_my_affiliation で大学が一意なら、その大学として検索してよい（その旨を明記）
+- 科目が曖昧なら search_subjects_by_name で候補を出し、ユーザーに選ばせる
+- rollup が無い / is_dirty=true / summaryが空 の場合は「集計中/データ不足」を正直に伝える
+- 可能なら review_count と主要平均（満足度/おすすめ度/難易度）を添える
+- 「単位落としてる割合」などは credit_outcomes を使い、母数も明記する
 `.trim();
 
-  // 1) まず最初の応答を作らせる（ここで tool を要求してくることが多い）
-  let resp = await openai.responses.create({
-    model: QA_MODEL,
-    input: [
-      { role: 'developer', content: developerPrompt },
-      { role: 'user', content: userMessage },
-    ],
-    tools,
-    tool_choice: 'auto',
-    parallel_tool_calls: false, // 最初は単発にしてデバッグ簡単にする
-  });
+  // 会話の土台（要約＋直近ログ）
+  const memoryBlock = memorySummary?.trim()
+    ? `【ユーザー長期メモ（要約）】\n${memorySummary.trim()}`
+    : `【ユーザー長期メモ（要約）】\n(まだ要約なし)`;
 
-  // 無限ループ防止：最大3回まで tool 往復
+  // 直近ログを Responses の input 形式に変換
+  const chatItems = recentChats.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  // 直近ログの末尾が「今のメッセージ」と同一なら、二重投入を避ける
+  const last = recentChats[recentChats.length - 1];
+  const shouldAppendUser =
+    !(last && last.role === 'user' && (last.content ?? '').trim() === userMessage.trim());
+
+  const input: any[] = [
+    { role: 'developer', content: developerPrompt },
+    { role: 'developer', content: memoryBlock },
+    ...chatItems,
+    ...(shouldAppendUser ? [{ role: 'user', content: userMessage }] : []),
+  ];
+
+  // 無限ループ防止：最大3往復
   for (let step = 0; step < 3; step++) {
-    // NOTE:
-    // resp.output は「文章」「function_call」など色々混ざる配列。
-    // OpenAI SDK の型的に ResponseOutputItem には name が無いので、
-    // function_call の要素だけ any として安全に抜く。
-    const output = ((resp as any).output ?? []) as any[];
-    const calls = output.filter((o) => o && o.type === 'function_call');
+    const resp = await openai.responses.create({
+      model: QA_MODEL,
+      input,
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false, // まずは単発で安定運用
+    });
 
-    // tool呼び出しが無い = これが最終回答
+    // tool呼び出し抽出
+    const calls = (resp.output || []).filter((o: any) => o.type === 'function_call');
+
     if (calls.length === 0) {
-      const text = String((resp as any).output_text ?? '').trim();
-      return text.length
-        ? text
-        : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。';
+      // tool無し＝最終回答
+      const text = (resp.output_text || '').trim();
+      return text.length ? text : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。';
     }
 
-    // 2) tool を実行して、その結果だけを次の input にする（previous_response_id で会話を継続）
-    const toolOutputs: any[] = [];
-
+    // tool実行→結果を function_call_output として input に追加
     for (const c of calls) {
-      const callId = String(c.call_id ?? '');
-      const name = String(c.name ?? '');
-
-      // arguments は文字列JSONで来ることが多い（違う形でも落ちないように保険）
-      let args: any = {};
-      try {
-        if (typeof c.arguments === 'string') args = JSON.parse(c.arguments);
-        else if (c.arguments && typeof c.arguments === 'object') args = c.arguments;
-      } catch {
-        args = {};
-      }
+      const name = c.name as string;
+      const args = c.arguments ? JSON.parse(c.arguments) : {};
 
       try {
         const result = await callTool(name, args, { userId });
-        toolOutputs.push({
+
+        input.push({
           type: 'function_call_output',
-          call_id: callId,
+          call_id: c.call_id,
           output: JSON.stringify({ ok: true, result }),
         });
       } catch (e: any) {
-        toolOutputs.push({
+        input.push({
           type: 'function_call_output',
-          call_id: callId,
+          call_id: c.call_id,
           output: JSON.stringify({ ok: false, error: e?.message ?? String(e) }),
         });
       }
     }
-
-    // 3) tool結果を渡して “続き” を生成（ここが Responses API の正攻法）
-    resp = await openai.responses.create({
-      model: QA_MODEL,
-      previous_response_id: (resp as any).id,
-      input: toolOutputs,
-      tools,
-      tool_choice: 'auto',
-      parallel_tool_calls: false,
-    });
   }
 
   return 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。';
@@ -493,23 +539,37 @@ export async function POST(req: Request) {
     // users.id（内部ID）を確定
     const userId = await getOrCreateUserId(body.line_user_id);
 
-    // （任意）チャットログ保存：必要なら有効化
-    // await supabaseAdmin.from('chat_messages').insert({ user_id: userId, role: 'user', content: message });
+    // 会話文脈（要約＋直近ログ）を読む
+    // ※ webhook 側でログを保存してる想定だが、直接叩いた時もあるのでここで読む
+    let memorySummary = '';
+    let recentChats: ChatRow[] = [];
 
-    const answer = await runAgent({ userMessage: message, userId });
+    try {
+      memorySummary = await getUserMemorySummary(userId);
+    } catch (e) {
+      // 失敗しても致命ではない（雑談はできる）
+      console.error('[api/ask] getUserMemorySummary error:', e);
+    }
 
-    // （任意）チャットログ保存：必要なら有効化
-    // await supabaseAdmin.from('chat_messages').insert({ user_id: userId, role: 'assistant', content: answer });
+    try {
+      recentChats = await getRecentChatMessages(userId, 16);
+    } catch (e) {
+      console.error('[api/ask] getRecentChatMessages error:', e);
+    }
 
-    return new NextResponse(
-      JSON.stringify({ ok: true, user_id: userId, answer }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      }
-    );
+    const answer = await runAgent({
+      userMessage: message,
+      userId,
+      memorySummary,
+      recentChats,
+    });
+
+    return NextResponse.json({ ok: true, user_id: userId, answer });
   } catch (e: any) {
     console.error('[api/ask] error:', e);
-    return NextResponse.json({ ok: false, error: e?.message ?? 'server error' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? 'server error', details: supabaseErrorToJson(e) },
+      { status: 500 }
+    );
   }
 }
