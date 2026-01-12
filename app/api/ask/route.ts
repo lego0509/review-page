@@ -501,7 +501,13 @@ export async function POST(req: Request) {
     // （任意）チャットログ保存：必要なら有効化
     // await supabaseAdmin.from('chat_messages').insert({ user_id: userId, role: 'assistant', content: answer });
 
-    return NextResponse.json({ ok: true, user_id: userId, answer });
+    return new NextResponse(
+      JSON.stringify({ ok: true, user_id: userId, answer }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      }
+    );
   } catch (e: any) {
     console.error('[api/ask] error:', e);
     return NextResponse.json({ ok: false, error: e?.message ?? 'server error' }, { status: 500 });
