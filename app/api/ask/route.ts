@@ -110,102 +110,92 @@ async function getOrCreateUserId(lineUserId: string) {
 const tools: OpenAI.Responses.Tool[] = [
   {
     type: 'function',
-    function: {
-      name: 'get_my_affiliation',
-      description:
-        'ユーザーの登録済み所属（大学/学部/学科）を返す。未登録なら null を返す。',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-        additionalProperties: false,
-      },
+    name: 'get_my_affiliation',
+    description:
+      'ユーザーの登録済み所属（大学/学部/学科）を返す。未登録なら null を返す。',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
     },
   },
   {
     type: 'function',
-    function: {
-      name: 'resolve_university',
-      description:
-        '大学名から universities を検索して候補を返す。完全一致があればそれを優先する。',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: {
-          university_name: { type: 'string', description: '大学名（ユーザー入力）' },
-          limit: { type: 'integer', description: '候補数（1〜10）' },
-        },
-        required: ['university_name', 'limit'],
-        additionalProperties: false,
+    name: 'resolve_university',
+    description:
+      '大学名から universities を検索して候補を返す。完全一致があればそれを優先する。',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        university_name: { type: 'string', description: '大学名（ユーザー入力）' },
+        limit: { type: 'integer', description: '候補数（1〜10）' },
       },
+      required: ['university_name', 'limit'],
+      additionalProperties: false,
     },
   },
   {
     type: 'function',
-    function: {
-      name: 'search_subjects_by_name',
-      description:
-        '指定大学の subjects から科目名の部分一致で検索して候補を返す（曖昧なときの候補出し用）。',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: {
-          university_id: { type: 'string', description: 'universities.id (uuid)' },
-          keyword: { type: 'string', description: '科目名キーワード（部分一致）' },
-          limit: { type: 'integer', description: '最大件数（1〜20）' },
-        },
-        required: ['university_id', 'keyword', 'limit'],
-        additionalProperties: false,
+    name: 'search_subjects_by_name',
+    description:
+      '指定大学の subjects から科目名の部分一致で検索して候補を返す（曖昧なときの候補出し用）。',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        university_id: { type: 'string', description: 'universities.id (uuid)' },
+        keyword: { type: 'string', description: '科目名キーワード（部分一致）' },
+        limit: { type: 'integer', description: '最大件数（1〜20）' },
       },
+      required: ['university_id', 'keyword', 'limit'],
+      additionalProperties: false,
     },
   },
   {
     type: 'function',
-    function: {
-      name: 'get_subject_rollup',
-      description:
-        'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。必要なら単位取得状況も course_reviews から集計して返す。',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: {
-          subject_id: { type: 'string', description: 'subjects.id (uuid)' },
-        },
-        required: ['subject_id'],
-        additionalProperties: false,
+    name: 'get_subject_rollup',
+    description:
+      'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。必要なら単位取得状況も course_reviews から集計して返す。',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        subject_id: { type: 'string', description: 'subjects.id (uuid)' },
       },
+      required: ['subject_id'],
+      additionalProperties: false,
     },
   },
   {
     type: 'function',
-    function: {
-      name: 'top_subjects_by_metric',
-      description:
-        '指定大学の subject_rollups から、指標で上位/下位の科目を返す（おすすめ/難しい授業など）。',
-      strict: true,
-      parameters: {
-        type: 'object',
-        properties: {
-          university_id: { type: 'string', description: 'universities.id (uuid)' },
-          metric: {
-            type: 'string',
-            enum: [
-              'avg_satisfaction',
-              'avg_recommendation',
-              'avg_class_difficulty',
-              'avg_assignment_load',
-              'avg_attendance_strictness',
-              'avg_credit_ease',
-            ],
-          },
-          order: { type: 'string', enum: ['asc', 'desc'] },
-          limit: { type: 'integer', description: '最大件数（1〜10）' },
-          min_reviews: { type: 'integer', description: '最低レビュー数（0以上）' },
+    name: 'top_subjects_by_metric',
+    description:
+      '指定大学の subject_rollups から、指標で上位/下位の科目を返す（おすすめ/難しい授業など）。',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        university_id: { type: 'string', description: 'universities.id (uuid)' },
+        metric: {
+          type: 'string',
+          enum: [
+            'avg_satisfaction',
+            'avg_recommendation',
+            'avg_class_difficulty',
+            'avg_assignment_load',
+            'avg_attendance_strictness',
+            'avg_credit_ease',
+          ],
         },
-        required: ['university_id', 'metric', 'order', 'limit', 'min_reviews'],
-        additionalProperties: false,
+        order: { type: 'string', enum: ['asc', 'desc'] },
+        limit: { type: 'integer', description: '最大件数（1〜10）' },
+        min_reviews: { type: 'integer', description: '最低レビュー数（0以上）' },
       },
+      required: ['university_id', 'metric', 'order', 'limit', 'min_reviews'],
+      additionalProperties: false,
     },
   },
 ];
