@@ -26,7 +26,7 @@ function requireEnv(name: string, value?: string | null) {
 }
 
 const OPENAI_API_KEY = requireEnv('OPENAI_API_KEY', process.env.OPENAI_API_KEY);
-const QA_MODEL = process.env.OPENAI_QA_MODEL || 'gpt-5-mini'; // ここは好みで
+const QA_MODEL = process.env.OPENAI_QA_MODEL || 'gpt-5-mini';
 const LINE_HASH_PEPPER = requireEnv('LINE_HASH_PEPPER', process.env.LINE_HASH_PEPPER);
 
 /** ---------- OpenAI client ---------- */
@@ -79,7 +79,7 @@ async function getOrCreateUserId(lineUserId: string) {
   if (findErr) throw findErr;
   if (found?.id) return found.id as string;
 
-  // 新規作成（同時投稿のunique競合に備えてリトライ）
+  // 新規作成（同時実行のunique競合に備えてリトライ）
   const { data: inserted, error: insErr } = await supabaseAdmin
     .from('users')
     .insert({ line_user_hash: hash })
@@ -102,17 +102,11 @@ async function getOrCreateUserId(lineUserId: string) {
 }
 
 /** ---------- tools（Function Calling）定義 ---------- */
-/**
- * strict: true を使うと、JSON schemaにきっちり合わせて呼んでくれる（ズレが減る）
- * - additionalProperties:false が必要
- * - required に全フィールドが必要（任意にしたい場合は type:["string","null"] みたいにする） :contentReference[oaicite:1]{index=1}
- */
 const tools: OpenAI.Responses.Tool[] = [
   {
     type: 'function',
     name: 'get_my_affiliation',
-    description:
-      'ユーザーの登録済み所属（大学/学部/学科）を返す。未登録なら null を返す。',
+    description: 'ユーザーの登録済み所属（大学/学部/学科）を返す。未登録なら null を返す。',
     strict: true,
     parameters: {
       type: 'object',
@@ -124,8 +118,7 @@ const tools: OpenAI.Responses.Tool[] = [
   {
     type: 'function',
     name: 'resolve_university',
-    description:
-      '大学名から universities を検索して候補を返す。完全一致があればそれを優先する。',
+    description: '大学名から universities を検索して候補を返す。完全一致があればそれを優先する。',
     strict: true,
     parameters: {
       type: 'object',
@@ -216,7 +209,7 @@ async function tool_get_my_affiliation(ctx: { userId: string }) {
     university_id: data.university_id as string,
     university_name: (data as any).universities?.name ?? null,
     faculty: data.faculty as string,
-    department: data.department as string | null,
+    department: (data.department as string | null) ?? null,
   };
 }
 
@@ -224,19 +217,20 @@ async function tool_resolve_university(args: { university_name: string; limit: n
   const name = args.university_name.trim();
   const limit = Math.max(1, Math.min(10, args.limit || 5));
 
-  // まず完全一致（大小無視）を優先
+  // 完全一致（大小無視はしない：まずは完全一致として扱う）
+  // ※ ilike で完全一致も可能だけど、複数ヒットした時に maybeSingle が落ちるので eq を優先
   const { data: exact, error: exactErr } = await supabaseAdmin
     .from('universities')
     .select('id,name')
-    .ilike('name', name)
+    .eq('name', name)
     .maybeSingle();
 
   if (exactErr) throw exactErr;
   if (exact?.id) {
-    return { picked: exact, candidates: [exact] };
+    return { picked: exact as UniversityHit, candidates: [exact as UniversityHit] };
   }
 
-  // 次に部分一致候補
+  // 部分一致候補
   const { data: hits, error } = await supabaseAdmin
     .from('universities')
     .select('id,name')
@@ -271,7 +265,6 @@ async function tool_search_subjects_by_name(args: {
 
   if (error) throw error;
 
-  // rollupsのreview_countも一緒に返したいならここで追加クエリする（最低限なので省略）
   return (data || []) as SubjectHit[];
 }
 
@@ -287,8 +280,7 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
 
   if (rollErr) throw rollErr;
 
-  // rollupsが無い（まだ未作成/未upsert）の場合もある
-  // その場合は subject名だけでも返して、AI側が「まだ集計が無い」を言えるようにする
+  // 2) 科目名・大学名
   const { data: subj, error: subjErr } = await supabaseAdmin
     .from('subjects')
     .select('id,name,university_id,universities(name)')
@@ -297,11 +289,7 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
 
   if (subjErr) throw subjErr;
 
-  // 2) 「単位取得状況」系（performance_self）を最小で集計
-  // - 2: 単位なし
-  // - 3: 単位あり（普通）
-  // - 4: 単位あり（高評価）
-  // - 1: 未評価（参考用）
+  // 3) 「単位取得状況（performance_self）」を簡易集計
   const { data: perfRows, error: perfErr } = await supabaseAdmin
     .from('course_reviews')
     .select('performance_self')
@@ -326,8 +314,8 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
   return {
     subject: {
       id: subj?.id ?? args.subject_id,
-      name: subj?.name ?? null,
-      university_id: subj?.university_id ?? null,
+      name: (subj as any)?.name ?? null,
+      university_id: (subj as any)?.university_id ?? null,
       university_name: (subj as any)?.universities?.name ?? null,
     },
     rollup: (rollup || null) as RollupRow | null,
@@ -357,19 +345,16 @@ async function tool_top_subjects_by_metric(args: {
   const minReviews = Math.max(0, args.min_reviews || 0);
 
   // rollups -> subjects を join して科目名を取る
-  // PostgRESTの埋め込みselectで subjects(name) が取れる想定
   const { data, error } = await supabaseAdmin
     .from('subject_rollups')
-    .select(
-      `subject_id,review_count,${args.metric},subjects(name,university_id)`
-    )
+    .select(`subject_id,review_count,${args.metric},subjects(name,university_id)`)
     .gte('review_count', minReviews)
     .order(args.metric, { ascending: args.order === 'asc', nullsFirst: false })
     .limit(limit);
 
   if (error) throw error;
 
-  // 大学で絞り込み（join結果のsubjects.university_idでフィルタ）
+  // 大学で絞り込み（ネストフィルタは環境差が出やすいのでJS側で確実にやる）
   const filtered = (data || []).filter((r: any) => r.subjects?.university_id === args.university_id);
 
   return filtered.map((r: any) => ({
@@ -399,7 +384,7 @@ async function callTool(name: string, args: any, ctx: { userId: string }) {
   }
 }
 
-/** ---------- メイン：Function Calling ループ ---------- */
+/** ---------- メイン：Function Calling（Responses API） ---------- */
 async function runAgent(params: { userMessage: string; userId: string }) {
   const { userMessage, userId } = params;
 
@@ -415,54 +400,78 @@ async function runAgent(params: { userMessage: string; userId: string }) {
 - rollup が存在しない / is_dirty=true / summaryが空などの場合は「集計中/データ不足」を正直に伝える。
 - 回答には可能なら review_count と主要な平均値（満足度/おすすめ度/難易度）を添える。
 - 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
-`;
+`.trim();
 
-  // Responses API の input は「会話の流れ」を配列で渡す
-  const input: any[] = [
-    { role: 'developer', content: developerPrompt },
-    { role: 'user', content: userMessage },
-  ];
+  // 1) まず最初の応答を作らせる（ここで tool を要求してくることが多い）
+  let resp = await openai.responses.create({
+    model: QA_MODEL,
+    input: [
+      { role: 'developer', content: developerPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    tools,
+    tool_choice: 'auto',
+    parallel_tool_calls: false, // 最初は単発にしてデバッグ簡単にする
+  });
 
   // 無限ループ防止：最大3回まで tool 往復
   for (let step = 0; step < 3; step++) {
-    const resp = await openai.responses.create({
-      model: QA_MODEL,
-      input,
-      tools,
-      tool_choice: 'auto',
-      parallel_tool_calls: false, // まずは単発ツールにしてデバッグ簡単にする
-    });
+    // NOTE:
+    // resp.output は「文章」「function_call」など色々混ざる配列。
+    // OpenAI SDK の型的に ResponseOutputItem には name が無いので、
+    // function_call の要素だけ any として安全に抜く。
+    const output = ((resp as any).output ?? []) as any[];
+    const calls = output.filter((o) => o && o.type === 'function_call');
 
-    // 1) tool呼び出しがあるか確認（output配列に type:"function_call" が入る） :contentReference[oaicite:2]{index=2}
-    const calls = (resp.output || []).filter((o: any) => o.type === 'function_call');
-
+    // tool呼び出しが無い = これが最終回答
     if (calls.length === 0) {
-      // 2) tool呼び出しが無い = これが最終回答
-      const text = (resp.output_text || '').trim();
-      return text.length ? text : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。';
+      const text = String((resp as any).output_text ?? '').trim();
+      return text.length
+        ? text
+        : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。';
     }
 
-    // 3) toolを実行して結果を input に積む
+    // 2) tool を実行して、その結果だけを次の input にする（previous_response_id で会話を継続）
+    const toolOutputs: any[] = [];
+
     for (const c of calls) {
-      const name = c.name as string;
-      const args = c.arguments ? JSON.parse(c.arguments) : {};
+      const callId = String(c.call_id ?? '');
+      const name = String(c.name ?? '');
+
+      // arguments は文字列JSONで来ることが多い（違う形でも落ちないように保険）
+      let args: any = {};
+      try {
+        if (typeof c.arguments === 'string') args = JSON.parse(c.arguments);
+        else if (c.arguments && typeof c.arguments === 'object') args = c.arguments;
+      } catch {
+        args = {};
+      }
 
       try {
         const result = await callTool(name, args, { userId });
-
-        input.push({
+        toolOutputs.push({
           type: 'function_call_output',
-          call_id: c.call_id,
+          call_id: callId,
           output: JSON.stringify({ ok: true, result }),
         });
       } catch (e: any) {
-        input.push({
+        toolOutputs.push({
           type: 'function_call_output',
-          call_id: c.call_id,
+          call_id: callId,
           output: JSON.stringify({ ok: false, error: e?.message ?? String(e) }),
         });
       }
     }
+
+    // 3) tool結果を渡して “続き” を生成（ここが Responses API の正攻法）
+    resp = await openai.responses.create({
+      model: QA_MODEL,
+      previous_response_id: (resp as any).id,
+      input: toolOutputs,
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+    });
   }
 
   return 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。';
