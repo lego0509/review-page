@@ -636,7 +636,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       user_id: userId,
-      answer: r.answer,
+      answer: r,
       ...(debug ? { debug: { forced_tool: r.forced, tool_calls: r.toolTrace } } : {}),
     });
   } catch (e: any) {
