@@ -16,7 +16,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
  * - 結果を function_call_output としてモデルへ返す
  * - モデルの最終回答（または聞き返し）を返す
  *
- * ※ 「自由なSQL」は絶対やらない。必ず “用意した関数（ツール）” だけ実行する。
+ * ※「自由なSQL」は絶対やらない。必ず “用意した関数（ツール）” だけ実行する。
  */
 
 /** ---------- 環境変数 ---------- */
@@ -29,6 +29,12 @@ const OPENAI_API_KEY = requireEnv('OPENAI_API_KEY', process.env.OPENAI_API_KEY);
 const QA_MODEL = process.env.OPENAI_QA_MODEL || 'gpt-5-mini';
 const LINE_HASH_PEPPER = requireEnv('LINE_HASH_PEPPER', process.env.LINE_HASH_PEPPER);
 
+/**
+ * ASK_DEBUG=1 なら、レスポンスに tool 呼び出し履歴を載せる（LINE運用では 0 推奨）
+ * もしくは header x-ask-debug: 1 で強制ON
+ */
+const ASK_DEBUG = process.env.ASK_DEBUG === '1';
+
 /** ---------- OpenAI client ---------- */
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -36,6 +42,8 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 type AskPayload = {
   line_user_id: string;
   message: string;
+  // 開発中にだけ使いたい場合（任意）
+  debug?: boolean;
 };
 
 type UniversityHit = { id: string; name: string };
@@ -66,6 +74,82 @@ type FunctionCallItem = {
   call_id: string;
 };
 
+/** ---------- ここが “プロンプト” の定義（見失わないように上部へ） ---------- */
+/**
+ * =========================================================
+ * ★ PROMPT(1) : developerPrompt（モデルの性格と制約）
+ * =========================================================
+ * - 「DB根拠で答えろ」「大学不明なら聞き返せ」などのルールを固定する場所
+ * - ここが “DB検索する／しない” の判断精度に直結する
+ */
+const PROMPT_DEVELOPER = `
+あなたは「大学授業レビューDB」を根拠に回答するアシスタント。
+必ずツールで取得した事実に基づいて答える（推測で断定しない）。
+
+【絶対ルール】
+- DBに存在しない情報（一般的なネット知識）で、特定の授業/大学を断定しておすすめしない。
+- 数字（満足度/おすすめ度/難易度/単位落とす割合など）を出すときは、必ずツール結果に基づく。
+- ツール結果が無いのに「DBでは〜」と言ってはいけない。
+
+【会話制御】
+- 大学が不明で特定できないなら、まず大学を聞き返す。
+  ただし get_my_affiliation が取れて大学が一意なら、その大学として検索してよい（その旨を回答に明記）。
+- 科目が曖昧なら、search_subjects_by_name で候補を出してユーザーに選ばせる。
+- rollup が存在しない / is_dirty=true / summaryが空などの場合は「集計中/データ不足」を正直に伝える。
+- 回答には可能なら review_count と主要な平均値（満足度/おすすめ度/難易度）を添える。
+- 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
+
+【出力の雰囲気】
+- LINE想定。長文になりすぎない。必要なら箇条書き。
+- 最後に、今回参照した根拠を短く付ける（例：レビュー数、対象大学名、対象科目名）。
+`;
+
+/**
+ * =========================================================
+ * ★ PROMPT(2) : instructions（Responses API の追加指示）
+ * =========================================================
+ * - developerPrompt と役割が近いが、こちらは「この呼び出しでの追加制約」
+ * - “ツールを使わずにDBっぽい断定をしない” をさらに強くする
+ *
+ * ※SDKの型・モデル差分で挙動が変わることがあるので、ここは短め&明確にするのが安定
+ */
+const PROMPT_INSTRUCTIONS = `
+あなたは授業レビューDBに基づく回答のみ行う。
+DB参照が必要な質問では、必ず tools を呼び出してから回答する。
+ツール結果が無い場合は「大学名を教えて」など必要情報を聞き返す。
+`;
+
+/**
+ * DBが必要そうな質問なのに tool を呼ばない事故があるので、
+ * “っぽい質問” は tool_choice='required' を使って強制する（保険）
+ */
+function shouldForceTool(userMessage: string) {
+  const t = userMessage.toLowerCase();
+
+  // 雑でも効果が高いキーワード群（あなたのドメインに合わせて足してOK）
+  const keywords = [
+    '授業',
+    '科目',
+    'おすすめ',
+    'レビュー',
+    '満足',
+    'おすすめ度',
+    '難易度',
+    '出席',
+    '課題',
+    '単位',
+    '落と',
+    'トップ',
+    'ランキング',
+    '平均',
+    'rollup',
+    'summary',
+  ];
+
+  return keywords.some((k) => t.includes(k));
+}
+
+/** ---------- util ---------- */
 function lineUserIdToHash(lineUserId: string) {
   // LINEのuserIdはDBに生で保存しない（ハッシュ化）
   return createHmac('sha256', LINE_HASH_PEPPER).update(lineUserId, 'utf8').digest('hex');
@@ -165,8 +249,7 @@ const tools: OpenAI.Responses.Tool[] = [
   {
     type: 'function',
     name: 'get_subject_rollup',
-    description:
-      'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。必要なら単位取得状況も返す。',
+    description: 'subject_id を指定して subject_rollups + 科目名 + 大学名を返す。必要なら単位取得状況も返す。',
     strict: true,
     parameters: {
       type: 'object',
@@ -316,7 +399,6 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
   let notRated = null as number | null;
 
   if (rollup) {
-    // よくありそうな命名揺れを複数拾う（どれか一致すればOK）
     noCredit = pickNumber(rollup, ['no_credit', 'no_credit_count', 'count_no_credit', 'cnt_no_credit']);
     creditNormal = pickNumber(rollup, ['credit_normal', 'credit_normal_count', 'count_credit_normal', 'cnt_credit_normal']);
     creditHigh = pickNumber(rollup, ['credit_high', 'credit_high_count', 'count_credit_high', 'cnt_credit_high']);
@@ -359,7 +441,6 @@ async function tool_get_subject_rollup(args: { subject_id: string }) {
       university_id: subj?.university_id ?? null,
       university_name: (subj as any)?.universities?.name ?? null,
     },
-    // rollup は存在しない可能性がある（まだ集計前など）
     rollup: (rollup || null) as RollupRow | null,
     credit_outcomes: {
       not_rated: notRated ?? 0,
@@ -429,28 +510,20 @@ async function callTool(name: string, args: any, ctx: { userId: string }) {
 }
 
 /** ---------- メイン：Function Calling ループ ---------- */
-async function runAgent(params: { userMessage: string; userId: string }) {
-  const { userMessage, userId } = params;
+async function runAgent(params: { userMessage: string; userId: string; debug: boolean }) {
+  const { userMessage, userId, debug } = params;
 
-  // モデルへの指示（ここが “性格” と “制約” の中心）
-  const developerPrompt = `
-あなたは「大学授業レビューDB」を根拠に回答するアシスタント。
-必ずツールで取得した事実に基づいて答える（推測で断定しない）。
-
-ルール：
-- 大学が不明で特定できないなら、まず大学を聞き返す。
-  ただし get_my_affiliation が取れて大学が一意なら、その大学として検索してよい（その旨を回答に明記）。
-- 科目が曖昧なら、search_subjects_by_name で候補を出してユーザーに選ばせる。
-- rollup が存在しない / is_dirty=true / summaryが空などの場合は「集計中/データ不足」を正直に伝える。
-- 回答には可能なら review_count と主要な平均値（満足度/おすすめ度/難易度）を添える。
-- 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
-`;
-
-  // Responses API の input は「会話の流れ」を配列で渡す
+  // ★ input が “実質プロンプト”。ここに developer を入れてるのが肝。
   const input: any[] = [
-    { role: 'developer', content: developerPrompt },
+    { role: 'developer', content: PROMPT_DEVELOPER }, // ← PROMPT(1) はここで使ってる
     { role: 'user', content: userMessage },
   ];
+
+  // toolを呼んだ履歴（デバッグ用）
+  const toolTrace: Array<{ step: number; name: string; args: any; ok: boolean }> = [];
+
+  // “DB必要そうな質問” は tool を強制する（保険）
+  const forceTool = shouldForceTool(userMessage);
 
   // 無限ループ防止：最大3回まで tool 往復
   for (let step = 0; step < 3; step++) {
@@ -458,13 +531,16 @@ async function runAgent(params: { userMessage: string; userId: string }) {
       model: QA_MODEL,
       input,
       tools,
-      tool_choice: 'auto',
-      parallel_tool_calls: false, // まずは単発にしてデバッグしやすく
-    });
+      // ★ここが “toolを呼ぶ/呼ばない” の実行方針
+      tool_choice: forceTool ? 'required' : 'auto',
+      parallel_tool_calls: false,
+      // ← PROMPT(2) はここ（instructions）で使ってる
+      //    developerPromptより短く、強く、ブレにくい縛りにする
+      instructions: PROMPT_INSTRUCTIONS,
+    } as any);
 
     /**
-     * ★ここが今回のビルドエラー原因だった部分
-     * resp.output は union 型で、TS が「function_call のときだけ name がある」ことを理解できない。
+     * resp.output は union 型で TS が「function_call のときだけ name がある」ことを理解できない。
      * → filter のあとで FunctionCallItem[] にキャストして “読める形” にする。
      */
     const calls = ((resp as any).output || []).filter((o: any) => o?.type === 'function_call') as FunctionCallItem[];
@@ -472,12 +548,18 @@ async function runAgent(params: { userMessage: string; userId: string }) {
     if (calls.length === 0) {
       // tool呼び出しが無い = 最終回答
       const text = (resp.output_text || '').trim();
-      return text.length ? text : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。';
+
+      return {
+        answer: text.length ? text : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。',
+        toolTrace,
+        forced: forceTool,
+      };
     }
 
     // tool実行→結果を function_call_output として input に追加
     for (const c of calls) {
       const name = c.name;
+
       let args: any = {};
       try {
         args = c.arguments ? JSON.parse(c.arguments) : {};
@@ -488,22 +570,35 @@ async function runAgent(params: { userMessage: string; userId: string }) {
       try {
         const result = await callTool(name, args, { userId });
 
+        toolTrace.push({ step, name, args, ok: true });
+
         input.push({
           type: 'function_call_output',
           call_id: c.call_id,
           output: JSON.stringify({ ok: true, result }),
         });
       } catch (e: any) {
+        toolTrace.push({ step, name, args, ok: false });
+
         input.push({
           type: 'function_call_output',
           call_id: c.call_id,
-          output: JSON.stringify({ ok: false, error: e?.message ?? String(e) }),
+          output: JSON.stringify({
+            ok: false,
+            error: e?.message ?? String(e),
+            // supabaseエラーっぽいのは詳細も残す（モデルがリカバリしやすい）
+            details: supabaseErrorToJson(e),
+          }),
         });
       }
     }
   }
 
-  return 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。';
+  return {
+    answer: 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。',
+    toolTrace,
+    forced: forceTool,
+  };
 }
 
 /** ---------- HTTPハンドラ ---------- */
@@ -519,13 +614,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'message is required' }, { status: 400 });
     }
 
+    const debug =
+      ASK_DEBUG || body.debug === true || req.headers.get('x-ask-debug') === '1';
+
     // users.id（内部ID）を確定
     const userId = await getOrCreateUserId(body.line_user_id);
 
     // ここでは「会話ログ保存」は webhook 側でやる前提
-    const answer = await runAgent({ userMessage: message, userId });
+    const r = await runAgent({ userMessage: message, userId, debug });
 
-    return NextResponse.json({ ok: true, user_id: userId, answer });
+    // debug時だけ “DB見たか” が分かる情報を返す
+    return NextResponse.json({
+      ok: true,
+      user_id: userId,
+      answer: r.answer,
+      ...(debug ? { debug: { forced_tool: r.forced, tool_calls: r.toolTrace } } : {}),
+    });
   } catch (e: any) {
     console.error('[api/ask] error:', e);
     return NextResponse.json({ ok: false, error: e?.message ?? 'server error' }, { status: 500 });
