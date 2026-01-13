@@ -510,56 +510,61 @@ async function callTool(name: string, args: any, ctx: { userId: string }) {
 }
 
 /** ---------- メイン：Function Calling ループ ---------- */
-async function runAgent(params: { userMessage: string; userId: string; debug: boolean }) {
-  const { userMessage, userId, debug } = params;
+async function runAgent(params: { userMessage: string; userId: string }) {
+  const { userMessage, userId } = params;
 
-  // ★ input が “実質プロンプト”。ここに developer を入れてるのが肝。
-  const input: any[] = [
-    { role: 'developer', content: PROMPT_DEVELOPER }, // ← PROMPT(1) はここで使ってる
-    { role: 'user', content: userMessage },
-  ];
+  // ★ここが “判断させる指示” の本体（プロンプト）
+  const developerPrompt = `
+あなたは「大学授業レビューDB」を根拠に回答するアシスタント。
+授業・科目・大学に関する質問は、必ずツールで取得した事実に基づいて答えること。
+ツールを呼ばずに一般知識で答えるのは禁止。データが取れない場合は「不明/要確認」と言い、必要なら聞き返す。
 
-  // toolを呼んだ履歴（デバッグ用）
-  const toolTrace: Array<{ step: number; name: string; args: any; ok: boolean }> = [];
+ルール：
+- 大学が不明で特定できないなら、まず大学を聞き返す。
+  ただし get_my_affiliation で大学が一意に取れたなら、その大学として検索してよい（その旨を回答に明記）。
+- 大学名が書かれている場合は resolve_university で候補を確定する。
+- 科目が曖昧なら search_subjects_by_name で候補を出してユーザーに選ばせる。
+- 「おすすめ上位」「難しい上位」などランキング系は top_subjects_by_metric を使う。
+- 個別科目の詳細は get_subject_rollup を使う。
+- rollup が無い / is_dirty=true / summaryが空などは「集計中/データ不足」を正直に伝える。
+- 回答には可能なら review_count と主要な平均値（満足度/おすすめ度/難易度）を添える。
+- 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
+`.trim();
 
-  // “DB必要そうな質問” は tool を強制する（保険）
-  const forceTool = shouldForceTool(userMessage);
+  // 1) 最初の問い合わせ（developer+user を渡す）
+  let resp = await openai.responses.create({
+    model: QA_MODEL,
+    input: [
+      { role: 'developer', content: developerPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    tools,
+    tool_choice: 'auto',
+    parallel_tool_calls: false,
+  });
 
-  // 無限ループ防止：最大3回まで tool 往復
-  for (let step = 0; step < 3; step++) {
-    const resp = await openai.responses.create({
-      model: QA_MODEL,
-      input,
-      tools,
-      // ★ここが “toolを呼ぶ/呼ばない” の実行方針
-      tool_choice: forceTool ? 'required' : 'auto',
-      parallel_tool_calls: false,
-      // ← PROMPT(2) はここ（instructions）で使ってる
-      //    developerPromptより短く、強く、ブレにくい縛りにする
-      instructions: PROMPT_INSTRUCTIONS,
-    } as any);
+  // ★ここが超重要：tool output は「直前の response」に紐づける必要がある
+  let previousResponseId = resp.id;
 
-    /**
-     * resp.output は union 型で TS が「function_call のときだけ name がある」ことを理解できない。
-     * → filter のあとで FunctionCallItem[] にキャストして “読める形” にする。
-     */
-    const calls = ((resp as any).output || []).filter((o: any) => o?.type === 'function_call') as FunctionCallItem[];
+  // 無限ループ防止（最大5回）
+  for (let step = 0; step < 5; step++) {
+    const calls = ((resp as any).output || []).filter(
+      (o: any) => o?.type === 'function_call'
+    ) as FunctionCallItem[];
 
+    // tool呼び出しが無い = 最終回答
     if (calls.length === 0) {
-      // tool呼び出しが無い = 最終回答
       const text = (resp.output_text || '').trim();
-
-      return {
-        answer: text.length ? text : 'すみません、うまく回答を作れませんでした。もう一度言い換えてください。',
-        toolTrace,
-        forced: forceTool,
-      };
+      return text.length
+        ? text
+        : 'すみません、うまく回答を作れませんでした。大学名と科目名をもう少し具体的に教えてください。';
     }
 
-    // tool実行→結果を function_call_output として input に追加
+    // 2) tool を実行して outputs を作る（ここだけを次の input に渡す）
+    const toolOutputs: any[] = [];
+
     for (const c of calls) {
       const name = c.name;
-
       let args: any = {};
       try {
         args = c.arguments ? JSON.parse(c.arguments) : {};
@@ -567,38 +572,42 @@ async function runAgent(params: { userMessage: string; userId: string; debug: bo
         args = {};
       }
 
+      // （任意）デバッグログ：DBを見に行ってるか確認したいとき用
+      if (process.env.DEBUG_ASK === '1') {
+        console.log('[ask] tool_call:', name, args);
+      }
+
       try {
         const result = await callTool(name, args, { userId });
 
-        toolTrace.push({ step, name, args, ok: true });
-
-        input.push({
+        toolOutputs.push({
           type: 'function_call_output',
           call_id: c.call_id,
           output: JSON.stringify({ ok: true, result }),
         });
       } catch (e: any) {
-        toolTrace.push({ step, name, args, ok: false });
-
-        input.push({
+        toolOutputs.push({
           type: 'function_call_output',
           call_id: c.call_id,
-          output: JSON.stringify({
-            ok: false,
-            error: e?.message ?? String(e),
-            // supabaseエラーっぽいのは詳細も残す（モデルがリカバリしやすい）
-            details: supabaseErrorToJson(e),
-          }),
+          output: JSON.stringify({ ok: false, error: e?.message ?? String(e) }),
         });
       }
     }
+
+    // 3) ★前の response に紐づけて toolOutputs を送る
+    resp = await openai.responses.create({
+      model: QA_MODEL,
+      previous_response_id: previousResponseId,
+      input: toolOutputs,
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+    });
+
+    previousResponseId = resp.id;
   }
 
-  return {
-    answer: 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。',
-    toolTrace,
-    forced: forceTool,
-  };
+  return 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。';
 }
 
 /** ---------- HTTPハンドラ ---------- */
