@@ -509,11 +509,37 @@ async function callTool(name: string, args: any, ctx: { userId: string }) {
   }
 }
 
-/** ---------- メイン：Function Calling ループ ---------- */
-async function runAgent(params: { userMessage: string; userId: string }) {
-  const { userMessage, userId } = params;
+type AgentTraceItem = {
+  step: number;
+  name: string;
+  args: any;
+  ok: boolean;
+  output_preview: string;
+};
 
-  // ★ここが “判断させる指示” の本体（プロンプト）
+type AgentResult = {
+  answer: string;
+  forced: 'auto' | 'required';
+  toolTrace: AgentTraceItem[];
+};
+
+function previewJson(v: any, max = 800) {
+  try {
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    return s.length > max ? s.slice(0, max) + '…' : s;
+  } catch {
+    const s = String(v);
+    return s.length > max ? s.slice(0, max) + '…' : s;
+  }
+}
+
+
+/** ---------- メイン：Function Calling ループ ---------- */
+async function runAgent(params: { userMessage: string; userId: string; debug?: boolean }): Promise<AgentResult> {
+  const { userMessage, userId, debug = false } = params;
+
+  // どっちでもいいけど、上で定義した定数を使うならこっちでもOK：
+  // const developerPrompt = PROMPT_DEVELOPER.trim();
   const developerPrompt = `
 あなたは「大学授業レビューDB」を根拠に回答するアシスタント。
 授業・科目・大学に関する質問は、必ずツールで取得した事実に基づいて答えること。
@@ -531,7 +557,10 @@ async function runAgent(params: { userMessage: string; userId: string }) {
 - 「単位落としてる割合」などは credit_outcomes を使って説明する（母数も書く）。
 `.trim();
 
-  // 1) 最初の問い合わせ（developer+user を渡す）
+  const forced: 'auto' | 'required' = shouldForceTool(userMessage) ? 'required' : 'auto';
+  const toolTrace: AgentTraceItem[] = [];
+
+  // 1) 最初の問い合わせ
   let resp = await openai.responses.create({
     model: QA_MODEL,
     input: [
@@ -539,32 +568,34 @@ async function runAgent(params: { userMessage: string; userId: string }) {
       { role: 'user', content: userMessage },
     ],
     tools,
-    tool_choice: 'auto',
+    tool_choice: forced,
     parallel_tool_calls: false,
   });
 
-  // ★ここが超重要：tool output は「直前の response」に紐づける必要がある
+  // tool output を紐づける response id
   let previousResponseId = resp.id;
 
-  // 無限ループ防止（最大5回）
   for (let step = 0; step < 5; step++) {
-    const calls = ((resp as any).output || []).filter(
-      (o: any) => o?.type === 'function_call'
-    ) as FunctionCallItem[];
+    const calls = ((resp as any).output || []).filter((o: any) => o?.type === 'function_call') as FunctionCallItem[];
 
-    // tool呼び出しが無い = 最終回答
+    // tool呼び出しが無い＝最終回答
     if (calls.length === 0) {
       const text = (resp.output_text || '').trim();
-      return text.length
-        ? text
-        : 'すみません、うまく回答を作れませんでした。大学名と科目名をもう少し具体的に教えてください。';
+      return {
+        answer: text.length
+          ? text
+          : 'すみません、うまく回答を作れませんでした。大学名と科目名をもう少し具体的に教えてください。',
+        forced,
+        toolTrace,
+      };
     }
 
-    // 2) tool を実行して outputs を作る（ここだけを次の input に渡す）
+    // 2) tool実行 → outputs 生成
     const toolOutputs: any[] = [];
 
     for (const c of calls) {
       const name = c.name;
+
       let args: any = {};
       try {
         args = c.arguments ? JSON.parse(c.arguments) : {};
@@ -572,13 +603,18 @@ async function runAgent(params: { userMessage: string; userId: string }) {
         args = {};
       }
 
-      // （任意）デバッグログ：DBを見に行ってるか確認したいとき用
-      if (process.env.DEBUG_ASK === '1') {
-        console.log('[ask] tool_call:', name, args);
-      }
-
       try {
         const result = await callTool(name, args, { userId });
+
+        if (debug) {
+          toolTrace.push({
+            step,
+            name,
+            args,
+            ok: true,
+            output_preview: previewJson({ ok: true, result }),
+          });
+        }
 
         toolOutputs.push({
           type: 'function_call_output',
@@ -586,6 +622,16 @@ async function runAgent(params: { userMessage: string; userId: string }) {
           output: JSON.stringify({ ok: true, result }),
         });
       } catch (e: any) {
+        if (debug) {
+          toolTrace.push({
+            step,
+            name,
+            args,
+            ok: false,
+            output_preview: previewJson({ ok: false, error: e?.message ?? String(e) }),
+          });
+        }
+
         toolOutputs.push({
           type: 'function_call_output',
           call_id: c.call_id,
@@ -594,7 +640,7 @@ async function runAgent(params: { userMessage: string; userId: string }) {
       }
     }
 
-    // 3) ★前の response に紐づけて toolOutputs を送る
+    // 3) 前の response に紐づけて toolOutputs を送る
     resp = await openai.responses.create({
       model: QA_MODEL,
       previous_response_id: previousResponseId,
@@ -607,8 +653,13 @@ async function runAgent(params: { userMessage: string; userId: string }) {
     previousResponseId = resp.id;
   }
 
-  return 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。';
+  return {
+    answer: 'すみません、検索が複雑になりすぎました。大学名と科目名をもう少し具体的に教えてください。',
+    forced,
+    toolTrace,
+  };
 }
+
 
 /** ---------- HTTPハンドラ ---------- */
 export async function POST(req: Request) {
@@ -629,16 +680,16 @@ export async function POST(req: Request) {
     // users.id（内部ID）を確定
     const userId = await getOrCreateUserId(body.line_user_id);
 
-    // ここでは「会話ログ保存」は webhook 側でやる前提
-    const r = await runAgent({ userMessage: message, userId });
+// ここでは「会話ログ保存」は webhook 側でやる前提
+  const r = await runAgent({ userMessage: message, userId, debug });
+  
+  return NextResponse.json({
+    ok: true,
+    user_id: userId,
+    answer: r.answer,
+    ...(debug ? { debug: { forced_tool: r.forced, tool_calls: r.toolTrace } } : {}),
+  });
 
-    // debug時だけ “DB見たか” が分かる情報を返す
-    return NextResponse.json({
-      ok: true,
-      user_id: userId,
-      answer: r,
-      ...(debug ? { debug: { forced_tool: r.forced, tool_calls: r.toolTrace } } : {}),
-    });
   } catch (e: any) {
     console.error('[api/ask] error:', e);
     return NextResponse.json({ ok: false, error: e?.message ?? 'server error' }, { status: 500 });
