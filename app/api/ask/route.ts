@@ -630,7 +630,7 @@ export async function POST(req: Request) {
     const userId = await getOrCreateUserId(body.line_user_id);
 
     // ここでは「会話ログ保存」は webhook 側でやる前提
-    const r = await runAgent({ userMessage: message, userId, debug });
+    const r = await runAgent({ userMessage: message, userId });
 
     // debug時だけ “DB見たか” が分かる情報を返す
     return NextResponse.json({
