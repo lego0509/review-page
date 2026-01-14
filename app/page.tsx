@@ -64,11 +64,11 @@ const assignmentDifficultyOptions = [
 
 // 5段階評価（DB列名に合わせる）
 const assessmentOptions = [
-  { key: 'credit_ease', label: '単位取得の容易さ' },
-  { key: 'class_difficulty', label: '授業の難易度（内容）' },
-  { key: 'assignment_load', label: '課題の量' },
+  { key: 'credit_ease', label: '単位取得の楽単度' },
+  { key: 'class_difficulty', label: '内容の難しさ' },
+  { key: 'assignment_load', label: '課題の多さ' },
   { key: 'attendance_strictness', label: '出席の厳しさ' },
-  { key: 'satisfaction', label: '満足度' },
+  { key: 'satisfaction', label: '総合満足度' },
   { key: 'recommendation', label: 'おすすめ度' },
 ] as const;
 
@@ -86,10 +86,57 @@ function buildAcademicYearOptions() {
 
 const academicYearOptions = buildAcademicYearOptions();
 
+// 小さな「必須」バッジ
+const RequiredBadge = () => (
+  <span className="mr-2 rounded-sm bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+    必須
+  </span>
+);
+
+// チェックマークアイコン
+const CheckIcon = () => (
+  <svg
+    className="ml-1.5 h-4 w-4 text-emerald-500"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="3"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <polyline points="20 6 9 17 4 12"></polyline>
+  </svg>
+);
+
+// スピナーアイコン
+const SpinnerIcon = () => (
+  <svg
+    className="-ml-1 mr-3 h-5 w-5 animate-spin text-white"
+    xmlns="http://www.w3.org/2000/svg"
+    fill="none"
+    viewBox="0 0 24 24"
+  >
+    <circle
+      className="opacity-25"
+      cx="12"
+      cy="12"
+      r="10"
+      stroke="currentColor"
+      strokeWidth="4"
+    ></circle>
+    <path
+      className="opacity-75"
+      fill="currentColor"
+      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+    ></path>
+  </svg>
+);
+
 export default function ReviewFormPage() {
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  // 'filling' | 'submitting' | 'success'
+  const [formStatus, setFormStatus] = useState<'filling' | 'submitting' | 'success'>('filling');
   const [submitError, setSubmitError] = useState<string>('');
-  const [submitSuccess, setSubmitSuccess] = useState<string>('');
+  const [lastReviewId, setLastReviewId] = useState<string>('');
 
   // LIFFから取れるLINEの生userId（DBには保存しない）
   const [lineUserId, setLineUserId] = useState<string>('');
@@ -102,36 +149,47 @@ export default function ReviewFormPage() {
   const [systemUserId, setSystemUserId] = useState<string>('');
   const [systemUserError, setSystemUserError] = useState<string>('');
 
-  // フォーム本体
-  const [form, setForm] = useState({
-    // ユーザー情報
+  // 単位数入力モード
+  const [creditInputMode, setCreditInputMode] = useState<'preset' | 'manual'>('preset');
+  const [presetCredits, setPresetCredits] = useState<number | null>(2); // デフォルト2単位
+
+  const initialFormState = {
     university: '',
     faculty: '',
     department: '',
-    gradeAtTake: 0, // 1..6 / 99
-
-    // 授業情報
+    gradeAtTake: 0,
     courseName: '',
-    teacherNames: [''] as string[], // ★UIとして入力欄は残すが、必須にはしない
-
-    // 受講情報
-    academicYear: new Date().getFullYear(), // 必須（デフォルト今年）
-    term: '', // 必須（s1/s2/q1..）
-    creditsAtTake: '', // 任意（文字列で保持してバリデーション）
-    requirementTypeAtTake: '', // 必須（required/elective/unknown）
-
-    // 4段階
-    performanceSelf: 0, // 1..4
-    assignmentDifficulty4: 0, // 1..4
-
-    // 5段階
+    teacherNames: [''],
+    academicYear: new Date().getFullYear(),
+    term: '',
+    manualCredits: '',
+    requirementTypeAtTake: '',
+    performanceSelf: 0,
+    assignmentDifficulty4: 0,
     ratings: assessmentOptions.reduce(
       (acc, curr) => ({ ...acc, [curr.key]: 0 }),
       {} as Record<RatingKey, number>
     ),
-
-    // コメント
     comment: '',
+  };
+
+  // フォーム本体
+  const [form, setForm] = useState(initialFormState);
+
+  // リアルタイムバリデーションの状態
+  const [validationStatus, setValidationStatus] = useState({
+    university: false,
+    faculty: false,
+    gradeAtTake: false,
+    courseName: false,
+    academicYear: true, // 初期値があるのでOK
+    term: false,
+    requirementTypeAtTake: false,
+    performanceSelf: false,
+    assignmentDifficulty4: false,
+    ratings: false,
+    comment: false,
+    credits: true, // 任意なので常にOK
   });
 
   // ----------------------------
@@ -315,6 +373,15 @@ export default function ReviewFormPage() {
     });
   };
 
+  const handleReset = () => {
+    setForm(initialFormState);
+    setPresetCredits(2);
+    setCreditInputMode('preset');
+    setFormStatus('filling');
+    setSubmitError('');
+    setLastReviewId('');
+  };
+
   /**
    * teacher_names は任意。
    * - 空欄・空白は除外して送る
@@ -328,59 +395,49 @@ export default function ReviewFormPage() {
    * 単位数：空ならnull、入力があるなら整数として扱う
    */
   const creditsValue = useMemo(() => {
-    const raw = form.creditsAtTake.trim();
+    if (creditInputMode === 'preset') {
+      return presetCredits;
+    }
+    // manual
+    const raw = form.manualCredits.trim();
     if (raw.length === 0) return null;
     const n = Number(raw);
     if (!Number.isInteger(n)) return NaN;
     return n;
-  }, [form.creditsAtTake]);
+  }, [creditInputMode, presetCredits, form.manualCredits]);
 
   // ----------------------------
   // フォームの妥当性チェック（送信ボタンの活性/非活性）
   // ----------------------------
   const isFormValid = useMemo(() => {
-    // 必須テキスト
-    const requiredText = [form.university, form.faculty, form.courseName];
-    if (!requiredText.every((v) => v.trim().length > 0)) return false;
+    return Object.values(validationStatus).every(Boolean);
+  }, [validationStatus]);
 
-    // 必須セレクト
-    if (form.gradeAtTake === 0) return false;
-    if (form.term.trim().length === 0) return false;
-    if (form.requirementTypeAtTake.trim().length === 0) return false;
-
-    // ★教員名は任意なので、ここで必須判定しない
-
-    // 4段階：どちらも必須
-    if (form.performanceSelf < 1 || form.performanceSelf > 4) return false;
-    if (form.assignmentDifficulty4 < 1 || form.assignmentDifficulty4 > 4) return false;
-
-    // 5段階：全部必須
-    const hasAllRatings = Object.values(form.ratings).every((val) => val >= 1 && val <= 5);
-    if (!hasAllRatings) return false;
-
-    // コメント長：コードポイント数で判定（絵文字対策）
-    if (charLen(form.comment.trim()) < MIN_COMMENT_LENGTH) return false;
-
-    // 単位数：任意だが入力されているなら正の整数
-    if (creditsValue !== null) {
-      if (!Number.isFinite(creditsValue) || creditsValue <= 0) return false;
-    }
-
-    // 年度：範囲チェック
-    if (form.academicYear < 1990 || form.academicYear > 2100) return false;
-
-    return true;
+  useEffect(() => {
+    setValidationStatus({
+      university: form.university.trim().length > 0,
+      faculty: form.faculty.trim().length > 0,
+      gradeAtTake: form.gradeAtTake > 0,
+      courseName: form.courseName.trim().length > 0,
+      academicYear: form.academicYear >= 1990 && form.academicYear <= 2100,
+      term: form.term.trim().length > 0,
+      requirementTypeAtTake: form.requirementTypeAtTake.trim().length > 0,
+      performanceSelf: form.performanceSelf >= 1 && form.performanceSelf <= 4,
+      assignmentDifficulty4: form.assignmentDifficulty4 >= 1 && form.assignmentDifficulty4 <= 4,
+      ratings: Object.values(form.ratings).every((val) => val >= 1 && val <= 5),
+      comment: charLen(form.comment.trim()) >= MIN_COMMENT_LENGTH,
+      credits: creditsValue === null || (Number.isFinite(creditsValue) && creditsValue > 0),
+    });
   }, [form, creditsValue]);
 
   // ----------------------------
   // 送信処理
   // ----------------------------
   const handleSubmit = async () => {
-    if (!isFormValid || isSubmitting) return;
+    if (!isFormValid || formStatus === 'submitting') return;
 
-    setIsSubmitting(true);
+    setFormStatus('submitting');
     setSubmitError('');
-    setSubmitSuccess('');
 
     try {
       // LINE userId が取れてないと、サーバ側で users.id を作れない
@@ -439,13 +496,47 @@ export default function ReviewFormPage() {
         throw new Error(`${baseMsg}${detailMsg}`);
       }
 
-      setSubmitSuccess(`投稿しました！ review_id: ${json.review_id ?? ''}`);
+      setLastReviewId(json.review_id ?? '');
+      setFormStatus('success');
     } catch (e: any) {
       setSubmitError(e?.message ?? '送信処理でエラーが発生しました');
-    } finally {
-      setIsSubmitting(false);
+      setFormStatus('filling');
     }
   };
+
+  // 送信完了画面
+  if (formStatus === 'success') {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-3 py-4 sm:px-4">
+        <div className="w-full max-w-xl text-center">
+          <div className="rounded-2xl bg-white/80 p-8 shadow-soft backdrop-blur-sm">
+            <svg
+              className="mx-auto h-16 w-16 text-emerald-500"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+              <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+            <h1 className="mt-4 text-2xl font-bold text-gray-800">投稿が完了しました</h1>
+            <p className="mt-2 text-sm text-gray-600">
+              ご協力いただきありがとうございます。いただいたレビューは、他の学生の貴重な情報源となります。
+            </p>
+            {lastReviewId && (
+              <p className="mt-2 text-xs text-gray-500">Review ID: {lastReviewId}</p>
+            )}
+            <button type="button" onClick={handleReset} className="button-primary mt-8 w-full max-w-xs">
+              別のレビューを投稿する
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="flex min-h-screen justify-center px-3 py-4 sm:px-4">
@@ -455,7 +546,6 @@ export default function ReviewFormPage() {
           <p className="text-sm text-gray-600">スマホで入力しやすいフォームに最適化しています</p>
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className="badge-soft">レビュー投稿フォーム</span>
-            <span>必須項目は「＊」が付いています</span>
           </div>
 
           {/* デバッグ表示：このシステムで使うユーザーID（users.id） */}
@@ -492,18 +582,17 @@ export default function ReviewFormPage() {
             {submitError}
           </div>
         ) : null}
-        {submitSuccess ? (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-            {submitSuccess}
-          </div>
-        ) : null}
 
-        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="space-y-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <SectionCard title="ユーザー情報" subtitle="大学・学部・学年（受講時点）を入力してください">
             <div className="grid gap-4">
               <div className="field-wrapper">
                 <label className="label" htmlFor="university">
-                  大学名＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    大学名
+                    {validationStatus.university && <CheckIcon />}
+                  </span>
                 </label>
                 <input
                   id="university"
@@ -517,7 +606,11 @@ export default function ReviewFormPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="field-wrapper">
                   <label className="label" htmlFor="faculty">
-                    学部名＊
+                    <span className="flex items-center">
+                      <RequiredBadge />
+                      学部名
+                      {validationStatus.faculty && <CheckIcon />}
+                    </span>
                   </label>
                   <input
                     id="faculty"
@@ -544,7 +637,11 @@ export default function ReviewFormPage() {
 
               <div className="field-wrapper sm:max-w-xs">
                 <label className="label" htmlFor="gradeAtTake">
-                  学年＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    学年
+                    {validationStatus.gradeAtTake && <CheckIcon />}
+                  </span>
                 </label>
                 <select
                   id="gradeAtTake"
@@ -567,7 +664,11 @@ export default function ReviewFormPage() {
             <div className="grid gap-4">
               <div className="field-wrapper">
                 <label className="label" htmlFor="courseName">
-                  科目名＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    科目名
+                    {validationStatus.courseName && <CheckIcon />}
+                  </span>
                 </label>
                 <input
                   id="courseName"
@@ -624,7 +725,11 @@ export default function ReviewFormPage() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="field-wrapper">
                 <label className="label" htmlFor="academicYear">
-                  受講年度＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    受講年度
+                    {validationStatus.academicYear && <CheckIcon />}
+                  </span>
                 </label>
                 <select
                   id="academicYear"
@@ -642,7 +747,11 @@ export default function ReviewFormPage() {
 
               <div className="field-wrapper">
                 <label className="label" htmlFor="term">
-                  学期＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    学期
+                    {validationStatus.term && <CheckIcon />}
+                  </span>
                 </label>
                 <select
                   id="term"
@@ -660,23 +769,68 @@ export default function ReviewFormPage() {
               </div>
 
               <div className="field-wrapper">
-                <label className="label" htmlFor="creditsAtTake">
-                  単位数
+                <label className="label">
+                  <span className="flex items-center">
+                    単位数
+                    {validationStatus.credits && <CheckIcon />}
+                  </span>
                 </label>
-                <input
-                  id="creditsAtTake"
-                  className="control"
-                  inputMode="numeric"
-                  placeholder="例：2（任意）"
-                  value={form.creditsAtTake}
-                  onChange={(e) => handleTextChange('creditsAtTake', e.target.value)}
-                />
-                <p className="mt-1 text-xs text-gray-500">空欄OK。入力する場合は正の整数</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {[1, 2, 4].map((val) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => {
+                        setCreditInputMode('preset');
+                        setPresetCredits(val);
+                      }}
+                      className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                        creditInputMode === 'preset' && presetCredits === val
+                          ? 'bg-brand-600 text-white shadow-sm'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      {val}単位
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreditInputMode('manual');
+                      setPresetCredits(null);
+                    }}
+                    className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                      creditInputMode === 'manual'
+                        ? 'bg-brand-600 text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    その他
+                  </button>
+                </div>
+
+                {creditInputMode === 'manual' && (
+                  <div className="mt-3">
+                    <input
+                      id="creditsAtTake"
+                      className="control"
+                      inputMode="numeric"
+                      placeholder="単位数を入力（任意）"
+                      value={form.manualCredits}
+                      onChange={(e) => handleTextChange('manualCredits', e.target.value)}
+                    />
+                    <p className="mt-1 text-xs text-gray-500">空欄OK。入力する場合は正の整数</p>
+                  </div>
+                )}
               </div>
 
               <div className="field-wrapper">
                 <label className="label" htmlFor="requirementTypeAtTake">
-                  必修/選択＊
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    必修/選択
+                    {validationStatus.requirementTypeAtTake && <CheckIcon />}
+                  </span>
                 </label>
                 <select
                   id="requirementTypeAtTake"
@@ -698,7 +852,13 @@ export default function ReviewFormPage() {
           <SectionCard title="成績・課題難易度" subtitle="短い選択項目をまとめています（必須）">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2 text-sm text-gray-700">
-                <p className="label">成績＊</p>
+                <p className="label">
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    成績
+                    {validationStatus.performanceSelf && <CheckIcon />}
+                  </span>
+                </p>
                 {performanceOptions.map((opt) => (
                   <label key={opt.value} className="flex items-center gap-2">
                     <input
@@ -715,7 +875,13 @@ export default function ReviewFormPage() {
               </div>
 
               <div className="space-y-2 text-sm text-gray-700">
-                <p className="label">課題の難易度＊</p>
+                <p className="label">
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    課題の難易度
+                    {validationStatus.assignmentDifficulty4 && <CheckIcon />}
+                  </span>
+                </p>
                 {assignmentDifficultyOptions.map((opt) => (
                   <label key={opt.value} className="flex items-center gap-2">
                     <input
@@ -738,20 +904,53 @@ export default function ReviewFormPage() {
             subtitle="すべての項目を1~5で評価してください（教材や形式はコメント欄に書いてください）"
           >
             <div className="grid gap-4 sm:grid-cols-2">
-              {assessmentOptions.map((item) => (
-                <StarRating
-                  key={item.key}
-                  label={`${item.label}＊`}
-                  value={form.ratings[item.key]}
-                  onChange={(val) => updateRating(item.key, val)}
-                />
-              ))}
+              {assessmentOptions.map((item) => {
+                const label = (
+                  <span className="flex items-center">
+                    <RequiredBadge />
+                    {item.label}
+                    {validationStatus.ratings && <CheckIcon />}
+                  </span>
+                );
+
+                if (item.key === 'assignment_load') {
+                  return (
+                    <div key={item.key}>
+                      <StarRating
+                        label={label}
+                        value={form.ratings[item.key]}
+                        onChange={(val) => updateRating(item.key, val)}
+                        starColor="text-yellow-400"
+                      />
+                      <div className="mt-1 flex justify-between px-0.5 text-xs text-gray-500">
+                        <span>少ない</span>
+                        <span>多い</span>
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <StarRating
+                    key={item.key}
+                    label={label}
+                    value={form.ratings[item.key]}
+                    onChange={(val) => updateRating(item.key, val)}
+                    starColor="text-yellow-400"
+                  />
+                );
+              })}
             </div>
           </SectionCard>
 
           <SectionCard title="コメント" subtitle="30文字以上でご記入ください（教材・形式・テスト方式などもここに）">
             <TextCounterTextarea
-              label="コメント"
+              label={
+                <span className="flex items-center">
+                  <RequiredBadge />
+                  コメント
+                  {validationStatus.comment && <CheckIcon />}
+                </span>
+              }
               value={form.comment}
               onChange={(val) => handleTextChange('comment', val)}
               minLength={MIN_COMMENT_LENGTH}
@@ -766,11 +965,18 @@ export default function ReviewFormPage() {
           <div className="sticky bottom-0 left-0 right-0 z-10 -mx-4 mt-2 bg-white/95 px-4 pb-3 pt-3 backdrop-blur">
             <button
               type="button"
-              className="button-primary w-full"
-              disabled={!isFormValid || isSubmitting}
+              className="button-primary flex w-full items-center justify-center"
+              disabled={!isFormValid || formStatus === 'submitting'}
               onClick={handleSubmit}
             >
-              {isSubmitting ? '送信中...' : 'レビューを投稿する'}
+              {formStatus === 'submitting' ? (
+                <>
+                  <SpinnerIcon />
+                  送信中...
+                </>
+              ) : (
+                'レビューを投稿する'
+              )}
             </button>
             <p className="mt-2 text-xs text-gray-500">
               ローカル開発では NEXT_PUBLIC_DEV_LINE_USER_ID があればそれを使います。
